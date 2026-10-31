@@ -42,6 +42,12 @@ processes, takes minutes, and is the slowest way to answer anything.
 | Widget methods | `scripts/widgets/widget.lua`, `text.lua`, `image.lua` |
 | Netvar types and dirty-event docs | `scripts/netvars.lua` (constructors are engine-bound) |
 | Atlases and `.tex` files | `data/databundles/images.zip` (not `data/images/`) |
+| Which font to use for what | `scripts/fonts.lua`, `widgets/redux/craftingmenu_details.lua` |
+| Item icon atlas for a prefab | `scripts/simutil.lua` (`GetInventoryItemAtlas`) |
+| Wood/panel/checkmark textures | `data/databundles/images.zip` + the asset table in `scripts/prefabs/global.lua` |
+| Playing a UI sound | `scripts/frontend.lua` (`GetSound`), `scripts/haptics.lua` (UI event list) |
+| Tweening / sliding a widget | `scripts/widgets/widget.lua` (`MoveTo`), `scripts/components/uianim.lua` |
+| Client-side saved preferences | `scripts/mainfunctions.lua` (`SetPersistentString`), `scripts/craftingmenuprofile.lua` |
 | Performance / profiling | `scripts/profiler.lua`, `perfutil.lua`, `consolecommands.lua` |
 
 If a signature is in doubt, check here rather than guessing — DST's API is loosely
@@ -100,14 +106,83 @@ documented and version-dependent.
 - **Declarations must be identical on the server and on every client**, for every entity.
   A mismatch fails entity deserialization. Never conditionally skip the attach step —
   not even when the local player has the tracker disabled.
-- The dirty event fires *before* the Lua update runs. In this mod all three tracker
-  strings share one dirty event so the client re-renders once per state change.
+- The dirty event fires *before* the Lua update runs. In this mod all four tracker
+  strings (`title`, `subtext`, `rows`, `state`) share one dirty event so the client
+  re-renders once per state change.
+- `scripts/netvars.lua`'s header documents the types and states that when a **mod** uses
+  netvars, server and every client must have the same mod active. `net_string` is listed
+  as "variable length string" with **no Lua-visible maximum**; keep payloads small
+  (a few hundred bytes) rather than relying on a cap. `net_bytearray`/`net_ushortarray`
+  are capped at 31 elements and described as expensive — prefer one packed string.
 
 ## Text and HUD
 
 - `Text(font, size, text, colour)` — font first. `DEFAULTFONT = "opensans"`
   (`scripts/fonts.lua`). `Text:SetHAlign` / `Text:SetVAlign` are in
   `scripts/widgets/text.lua`.
+- **`Text:SetPosition` is the CENTER of the text's region, and `SetHAlign` /
+  `SetVAlign` align the string *inside* that region** — not an offset of the region's
+  edge. With no `SetRegionSize`, the region auto-sizes to the string, so alignment has
+  no visible effect and a left-aligned label still grows both ways from its position.
+  To left-align at a fixed edge, set an explicit region and position its center:
+  `text:SetRegionSize(w, h); text:SetHAlign(ANCHOR_LEFT); text:SetPosition(x + w/2, y)`.
+  Vanilla does exactly this: `widgets/redux/achievementspanel.lua:113-122` (a row-wide
+  region centred on the row origin, text aligned left/right within it) and
+  `widgets/redux/characterbio.lua:77-89` (region equals text width, so they position at
+  `left + 0.5 * width`). Getting this wrong is how a HUD label ends up half off-screen.
+- **The status badges live in the top-right, under `controls.sidepanel`.** In this
+  build `widgets/controls.lua:133-135` creates
+  `sidepanel = topright_root:AddChild(Widget("sidepanel"))` at `(-80, -60)`, and the
+  non-split path adds `controls.status = sidepanel:AddChild(StatusDisplays(owner))` at
+  `(0, -110)` (`:211-212`) and `controls.clock = sidepanel:AddChild(UIClock())`.
+  `StatusDisplays` (`widgets/statusdisplays.lua:288-336`) arranges its badges on the
+  widget's own origin: columns `-80, -40, 0, +40` (boat meter, hunger, sanity, health) at
+  y `+20`/`-40`, so the cluster's left edge is the hunger badge. Combined Status
+  (`mods/workshop-1896968971/modmain.lua:338-351`) moves `sidepanel` to `(-100, -70)` and
+  rescales `topright_root` by `HUDScale * HUDSCALEFACTOR`, which is why a mod HUD must
+  not assume vanilla offsets.
+- **A widget cannot report its pixel size, but it can report positions.** `Widget`
+  exposes `GetWorldPosition()` (screen-space, `widgets/widget.lua:336-338`),
+  `GetWorldScale()` (`:548`), `GetPosition()` (parent space, `:340`) and `GetChildren()`
+  (`:262`) — but no `GetSize`/`GetBoundingBox` (only `Panel`/`Image` have sizes).
+  To hug a HUD element, take the extreme world position of its children and back off by
+  half the element's art width: `guidedmissiontracker.lua:MeasureRightMargin` does this
+  for the status badges so the card sits left of them whatever size they are.
+- **Dock HUD widgets to the vanilla scaling roots, not `HUD.root`.** `Controls`
+  (`widgets/controls.lua:496-545`) creates `top_root`, `topleft_root`, `bottom_root`,
+  `topright_root`, etc., each as a zero-size widget with `SetHAnchor` + `SetVAnchor`,
+  `SetScaleMode(SCALEMODE_PROPORTIONAL)` and `SetMaxPropUpscale(MAX_HUD_SCALE)`, then
+  adds a `*_scale_root` child that `Controls:SetHUDSize` scales (`:545-562`). Vanilla
+  toasts and team bars are added to `controls.topleft_root` (`:111-153`); the clock and
+  the status badges are in `topright_root` via `controls.sidepanel` (see above). A mod
+  HUD card should follow the same pattern: add it under the root it belongs to
+  (available once `SetMainCharacter` has run, i.e. by `playeractivated`) and, if it sets
+  its own anchors, set the matching scale mode and max upscale. Local coordinates in a
+  left-anchored root start at the screen's top-left; in a right-anchored root at the
+  screen's top-right, with negative x going left and negative y downward. This mod's
+  card docks to `controls.topright_root` so it lives beside the status badges rather
+  than under the insight button and gift toasts.
+  **Do not give the child its own `SCALEMODE_PROPORTIONAL`:** the root is already
+  scaled, so a scaled child compounds it. Observed in-game (2026-10-31): a card parented
+  to `controls.topleft_root` that also set `SCALEMODE_PROPORTIONAL` +
+  `SetMaxPropUpscale(MAX_HUD_SCALE)` rendered 1.25× too large. Add a plain child and let
+  the root scale it.
+- **Crafting menu frame geometry** (needed to line a mod panel up with it). The menu HUD
+  is added to `controls.left_root`, which is anchored left/middle
+  (`widgets/controls.lua:302,532-535`), and `widgets/redux/craftingmenu_hud.lua:23-36`
+  opens it by moving its `ui_root` to `x = 530` (not split screen) with the
+  `CraftingMenuWidget` centred at `x = -255` inside that. `MakeFrame(500, height)`
+  (`widgets/redux/craftingmenu_widget.lua:553-583`) then draws:
+  fill `backing.tex` scaled to `width + 10` (so it spans `x = 20 .. 530`),
+  left side `side.tex` at `-width/2 - 8` scaled to `|-26|` (centre `x = 17`, i.e. `4..30`,
+  mirrored for the left), right side mirrored at `+width/2 + 8`, and `top.tex` /
+  `bottom.tex` banners `534` wide. So when open, the crafting menu's visible wooden frame
+  starts ~8 px from the screen edge and its dark fill at 20 px. `side.tex` is drawn at
+  its natural aspect in our card but stretched in vanilla; the 26 px width either way
+  leaves the visible plank ~4 px inside the image's left edge (transparent margin).
+  Note `left_root` is scaled by `TheFrontEnd:GetCraftingMenuScale()` while the other
+  roots use `GetHUDScale()` (`controls.lua:556-591`), so the two can differ by a few px
+  at different user settings.
 - `Image(atlas, tex)`; `Image:SetTint(r, g, b, a)` is in `scripts/widgets/image.lua`
   (~line 142). `Image("images/global.xml", "square.tex")` is valid — `global.xml`
   lives inside `data/databundles/images.zip`.
@@ -119,6 +194,311 @@ documented and version-dependent.
   null-check `player.HUD` and `player.HUD.root`.
 - `TheNet:GetIsServer()` and `TheNet:IsDedicated()` are valid; `IsDedicated()` is the
   standard guard for client-only hooks (dedicated servers have no local player).
+
+## Fonts
+
+Verified against build 761239 (`version.txt`). Every constant in `scripts/fonts.lua` is a
+plain **global** (no `local`), and `main.lua:243` does `require("fonts")` during boot, so
+bare `TITLEFONT` / `UIFONT` / `BODYTEXTFONT` resolve in any `require()`d mod module and in
+widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
+
+| Constant | Alias string | Face | Typical use |
+|---|---|---|---|
+| `DEFAULTFONT` | `opensans` | Open Sans | plain sans fallback |
+| `TITLEFONT` | `bp100` | Belisa Plumilla Manual (100px pack) | big menu titles |
+| `UIFONT` | `bp50` | Belisa Plumilla Manual (50px pack) | crafting **item names**, HUD hints |
+| `BUTTONFONT` | `buttonfont` | Belisa Plumilla Manual | legacy dialog titles |
+| `BODYTEXTFONT` | `stint-ucr` | Stint Ultra Condensed | crafting descriptions, HUD clock, badges |
+| `NUMBERFONT` / `SMALLNUMBERFONT` | `stint-ucr` / `stint-small` | Stint Ultra Condensed | counters |
+| `CHATFONT` | `bellefair` | Bellefair (serif) | Redux dialog body |
+| `HEADERFONT` | `hammerhead` | Hammerhead | Redux window headers |
+| `NEWFONT_OUTLINE` | `spirequal_outline` | spirequal, **outline baked in** | tooltips/hover text |
+| `TALKINGFONT` | `talkingfont` | Belisa Plumilla Manual | character speech |
+
+- **Crafting menu typography** is the model for a HUD panel: recipe name is
+  `Text(UIFONT, 30)` (`widgets/redux/craftingmenu_details.lua:342`) and the description
+  below it is `BODYTEXTFONT` at 25 (`:361`). The HUD clock is `BODYTEXTFONT` 33
+  (`widgets/uiclock.lua:120`). Belisa for names, Stint for supporting text.
+- **There is no outline/shadow API on `Text`.** `SetShadowColor`, `SetOffset`,
+  `SetOutline`, `SetStroke*` do not exist in `widgets/text.lua`, anywhere else in the
+  scripts, or in the engine binaries. Outlines are **baked into specific font packages**
+  (`NEWFONT_OUTLINE`, `CHATFONT_OUTLINE`, `FALLBACK_FONT*_OUTLINE`) — none of them Belisa.
+  A drop shadow is done by adding a second offset `Text` (`widgets/button.lua:337-360`;
+  manual pattern `screens/multiplayermainscreen.lua:244-251`). Otherwise put dark backing
+  behind light text.
+- **A mod can ship a font**, but it is not needed for vanilla fonts: declare
+  `Asset("FONT", "fonts/x.zip")` and call `TheSim:LoadFont(path, alias, disable_color)`
+  (the same call `mainfunctions.lua:1328-1331` uses for every base font). There is **no**
+  `AddFont`/`AddModFont` API. A font package is a zip containing `font.fnt` + `font.tex`.
+
+## Item icons and UI atlases
+
+- **Icon convention: the texture name is `prefab_id .. ".tex"`.** `GetInventoryItemAtlas
+  (imagename, no_fallback)` (`scripts/simutil.lua:663-692`) is a plain global (required by
+  `main.lua:215`, long before mods load) and probes `images/inventoryimages1..4.xml` with
+  `TheSim:AtlasContains`. It needs **no entity**, so a client can resolve a built-in
+  prefab's icon from its id alone.
+- **`GetInventoryItemAtlas` must be called with `no_fallback = true` to test whether an
+  icon exists.** The last clause of `GetInventoryItemAtlas_Internal`
+  (`simutil.lua:683-685`) is
+  `or (not no_fallback or TheSim:AtlasContains(images4, imagename)) and images4`, so the
+  default call **always returns `images/inventoryimages4.xml` even for a frame that does
+  not exist** (yielding a blank/garbage quad, not nil). Use:
+
+  ```lua
+  local atlas = GetInventoryItemAtlas(prefab .. ".tex", true)
+  if atlas ~= nil then image = Image(atlas, prefab .. ".tex") end
+  ```
+- Verified 2026-10-31 (build 761239): all of `log` (#2), `flint` (#2), `firepit` (#2),
+  `goldnugget` (#2), `twigs` (#3), `torch` (#3), `spider` (#3), `researchlab` (#3) resolve
+  with `<prefab>.tex` and no rename. `hound.tex` exists **only** in
+  `images/scrapbook_icons1.xml`, so it does **not** resolve through this helper (use
+  `GetScrapbookIconAtlas_Internal`, `simutil.lua:749-757`, or a different prefab).
+  `researchlab` has no `prefabs/researchlab.lua` — the id is created in
+  `prefabs/scienceprototyper.lua:299` — and follows the same default.
+- Icons for non-item rows (e.g. a "survive until day N" row) have no item texture. Vanilla
+  candidates, all in atlases declared unconditionally in `prefabs/global.lua`:
+  `images/customisation.xml` → `day.tex` (127x127, a "DAY" wax-seal card; atlas declared at
+  `global.lua:511`), or the HUD clock pieces `images/hud.xml` → `clock_NIGHT.tex` +
+  `clock_rim.tex` (215x215 each; `global.lua:485`). Neither is in `inventoryimages1-4`, so
+  pass the atlas explicitly: `Image("images/customisation.xml", "day.tex")`.
+  `images/statusicons.xml` does not exist in this build.
+- The four `inventoryimages` atlases are loaded unconditionally
+  (`prefabs/global.lua:476-483`). `images/inventoryimages.xml` is legacy-for-mods and is
+  **not** probed by `GetInventoryItemAtlas`.
+- There is no `GetInventoryItemImage` / `GetItemImage`. Source icon art is **64x64**.
+  The crafting menu draws icons at `item_size = 94` with `SetScale(0.475)` ≈ 45px
+  (`widgets/redux/craftingmenu_widget.lua:937,943,1093`); inventory slots draw 64px art at
+  ×1.5 (`widgets/invslot.lua:466`).
+- Caveat: a prefab whose icon name differs from its id (skins, `ChangeImageName`) can only
+  be resolved from a live entity: `replica.inventoryitem:GetImage()` / `:GetAtlas()`
+  (`components/inventoryitem_replica.lua:157,170`). Helpers that handle this:
+  `RecipeTile.sSetImageFromRecipe` (`widgets/recipetile.lua:26,114`),
+  `ItemTile.sSetImageFromItem` (`widgets/itemtile.lua:16,385`).
+- **The crafting menu's wooden frame is `images/crafting_menu.xml`**, always loaded
+  (`prefabs/global.lua:307-312`). It is assembled from five plain `Image`s — no
+  nine-slice, no corner art (`widgets/redux/craftingmenu_widget.lua:553-605`):
+  `backing.tex` (63x63 fill, tinted to 0.5 alpha), `side.tex` (44x1023, mirrored on both
+  edges), `top.tex`/`bottom.tex` (1023x73, drawn 534x38), `horizontal_bar.tex`
+  (1023x30) as dividers. Authored panel width is ~500.
+- The thin divider under a recipe name in the crafting details is
+  `images/ui.xml` **`line_horizontal_white.tex`**, tinted `BROWN`
+  (`{97/255,73/255,46/255,1}`, `constants.lua:2323`), 4 px tall and panel-wide
+  (`widgets/redux/craftingmenu_details.lua:348-354`). It is cleaner than squashing the
+  ornate `horizontal_bar.tex` into a few pixels.
+- `images/ui.xml` has `checkmark.tex` (256x256); vanilla shows/hides it over a tile
+  (`widgets/templates.lua:1292-1295`). **`slot_fg_prototype.tex`,
+  `pinslot_fg_prototype.tex` and `craft_slot_prototype.tex` are hammer badges, not
+  checkmarks.** There is no `images/statusicons.xml`.
+- Decoded 2026-10-31: **`ui.xml checkmark.tex` is dark green** (average opaque RGB
+  26,35,0), so `SetTint(HIGHLIGHT_GOLD)` cannot make it gold. Drawn **untinted** at
+  24x24 it reads clearly on the dark wood, which is what this mod does. Gold alternatives
+  if ever needed: `global_redux.xml` `star_checked.tex` (gold star, 31x31 frame) or
+  `checkbox_normal_check.tex` (gold-framed checkbox), both in an always-loaded atlas
+  (`prefabs/global.lua:456-457`).
+- Verified against build 761239 (`images/crafting_menu.xml`): the frame also contains
+  `scrollbar_arrow_up.tex`, `scrollbar_arrow_down.tex` and their `_hl` focus variants,
+  each a 63x63 quad (UV span 0.0308 of the atlas). `checkmark.tex` is likewise present
+  in `images/ui.xml`. Both atlases are loaded unconditionally
+  (`prefabs/global.lua:307-312`).
+- **Texture contents, decoded from `crafting_menu.tex` (KTEX = 128-byte header + DXT5
+  mips, 2048x2048):**
+  - `backing.tex` is a **solid black** 63x63 blackout texture (decoded average RGB
+    0,0,0). It is the crafting menu's dimming fill, not wood. Using it as a visible
+    panel background gives a flat black slab.
+  - `skins_backing.tex` (219x109) is the **olive-brown speckled panel** used behind the
+    skin spinner (`widgets/redux/craftingmenu_skinselector.lua:52`); it is the wooden
+    fill to use when a panel needs an actual wood background.
+  - `side.tex` is 44x1023 but its art only occupies **columns ~7-30**; the rest is
+    transparent. A 26 px-wide `Image` therefore shows a ~13 px plank, and the
+    transparent margin means geometry placement alone does not align the visible art.
+    Mirrors the crafting menu: mirror the left copy (negative x scale) and inset the
+    centres so the visible planks are flush with the panel edges.
+  - `top.tex` and `bottom.tex` are 1023x73 ornate banner strips (drawn 534x38 by
+    `MakeFrame`), and `page_bg.tex` (127x69) is a wood plank with a shaped right edge —
+    useful as a tab, not as a full fill.
+- `UICOLOURS` entries are `RGB()` tables of four 0-1 floats
+  (`constants.lua:2326`, `RGB` at `:1662` returns `{r/255, g/255, b/255, 1}`), so they
+  can be passed straight to `Text(font, size, text, colour)` and
+  `Image:SetTint(unpack(UICOLOURS.X))`.
+- Resizable frames do exist if the crafting frame is too rigid: `NineSlice`
+  (`widgets/nineslice.lua:52`, ten texture names, `SetSize`) and engine `Panel`
+  (`widgets/panel.lua:10`, one texture + pixel borders). The engine one is the cleaner
+  option for a one-texture trim: `local p = Panel(atlas, tex)` then
+  `p:SetNineSliceCoords(minx, miny, maxx, maxy)` (pixel coords of the **inner** rect,
+  measured from the texture's top-left — `feedbackscreen.lua:99-101` uses
+  `SetNineSliceCoords(36, 20, 620, 63)` + `SetNineSliceBorderScale(0.5)`), then
+  `p:SetSize(w, h)` (outer sizing). Corners keep their pixel size, edges stretch.
+  `wrap(require("widgets/panel"))` — the module returns the class.
+- **Slim trim candidate for a HUD card**: `images/crafting_menu.xml` `pinslot_bg.tex`
+  (128x128, the wooden frame drawn around a pinned/craftable recipe), inner rect about
+  `14, 14, 114, 114`; used as a nine-slice it gives a thin wooden edge at any size. Its
+  interior is a light tan weave, so it needs a dark fill inset behind the text. Other
+  trims decoded for comparison: `slot_bg.tex` (plain tan slot), `filterslot_bg.tex`
+  (68x68 rounded tab), `page_bg.tex` (wood tab with a shaped edge), `images/9slice.xml`
+  `roundbox.tex` (grey rounded box, `Panel`'s default 30,30,70,70), and the front-end
+  `images/fepanels.xml` `wideframe.tex` / `tallframe.tex` (black ornate line frames).
+- **The inventory bar's frame** is a single stretchy panel, not assembled art.
+  `widgets/inventorybar.lua:76-77` adds `images/hud.xml` `inventory_bg.tex` (1352x250,
+  dark leather interior with a ~26 px wooden rim and rounded corners) plus
+  `inventory_bg_cover.tex`, and `:359-362` resizes it with
+  `self.bg:Flow(total_w + 60, 256, true)` — the comment there says *"Flow is a 3-slice
+  function"*. `Image:Flow` is an **engine** method (no Lua definition anywhere in
+  `scripts/`), used for this one texture only, so its cap widths are not verifiable
+  from scripts. Pixels: `inventory_bg.tex` is uniform between column ~26 and ~1326, so
+  the caps are narrow and it stretches horizontally well; its height is authored at 250
+  and `Flow`'s second argument rescales the whole panel vertically.
+- **The inventory panel is only three-sided: top + left + right, open at the
+  bottom** (verified by decoding: `inventory_corner.tex` is the left cap with the rail
+  along its top and left edges, `inventory_filler.tex` has only a top rail, and both run
+  opaque leather to their last row with no bottom border). It is drawn hanging off the
+  bottom of the screen, so its open edge is hidden by the screen edge. Both pieces have
+  transparent margins (~2 px at the top, ~10 px on the outer side), and the rail band
+  from the texture edge inward is: 2 px transparent, ~9 px dark, ~11 px wood, ~4 px
+  shadow, then leather — so the rail is ~26 px thick and the visible side rim ~20 px
+  wide. Drawn at the panel's authored 256 px height (scaling it to the card height squashes the carved corners and
+  thins the rail), clips it with `SetScissor`, and caps the open edge with a second,
+  vertically mirrored copy (`SetScale(1,-1,1)`) clipped to the rail band only.
+  **That flipped copy must be clipped to the rail band, not drawn over the whole card:**
+  its leather interior is opaque, so two full-size copies simply hide each other's rail
+  — whichever is drawn last wins.
+  The panel is assembled by hand (one `inventory_filler.tex` stretched across the width,
+  the two caps drawn over its ends) rather than with `ThreeSlice`, because `ThreeSlice`
+  tiles the middle and **the filler's wooden rail carries a left-to-right gradient, so
+  every tile seam shows up as a vertical line in the rail**. The leather interior is
+  uniform, which is why the seams only appear in the rail band.
+  Exact edge measurements from the decoded cap (all in texture px): leather interior
+  `x <= 37`, inner shadow `38..42`, wood rim `43..50`, **opaque black `51..56`,
+  transparent `57..63`**; down the top edge it is 2 px transparent then `~9` px black
+  before the wood at row 11. The carved corner ornament sits *inside* the rim, from
+  row ~8 inward. The black outline is baked into the texture and is what the carved
+  corners sit against — cropping into it shortens the ornaments, so draw the panel
+  exactly as authored (push out only the one fully transparent row). The transparent
+  side margin then sits inside the card, where the filler drawn behind it fills it
+  with leather.
+- The matching 3-slice pieces exist as separate atlas regions, so the same panel can be
+  drawn in plain Lua without the engine method: `inventory_corner.tex` (64x256, left cap
+  with the top and bottom rim) and `inventory_filler.tex` (64x256, repeating middle) are
+  in `images/hud.xml` and **referenced by no script** — they are what `Image:Flow` uses
+  internally. `ThreeSlice` (`widgets/threeslice.lua`, `return ThreeSlice` at the end, so
+  `require "widgets/threeslice"` works) does exactly this: start cap at native width,
+  end cap mirrored, filler tiles scaled to the remaining span, and
+  `Flow(width, height, true)` scales the root to the requested height. This is the
+  vanilla-assembled route (`widgets/spinner.lua:87`, `widgets/votedialog.lua:43`).
+- Archive split: most `images/*.xml` are in `images.zip`; for `fepanels`, `fepanel_fills`,
+  `options_bg`, `globalpanels2` the `.xml` is in the zip but the `.tex` is loose in
+  `data/images/`.
+- Colour tables worth reusing (`scripts/constants.lua`): bare globals `BROWN`
+  `{97,73,46}` (`:2321`), `GOLD`, `BLACK`, `DARKGREY`; and `UICOLOURS` (`:2326`) with
+  `HIGHLIGHT_GOLD`, `GOLD_FOCUS`, `BROWN_MEDIUM`, `BROWN_DARK`, `IVORY`, `IVORY_70`.
+  The HUD signals "unavailable" with a light red (`widgets/ingredientui.lua:55`) and
+  otherwise uses texture swaps/alpha rather than colour; **green is not used for
+  positive state**.
+
+## UI sounds
+
+- `TheFrontEnd:GetSound():PlaySound(event, name, volume)` — `scripts/frontend.lua:564-566`,
+  emitter created at `:213`. `TheFrontEnd` is a client-only global (`main.lua:326`,
+  `mainfunctions.lua:1442`) and is the normal way HUD widgets play sounds
+  (`widgets/button.lua:68`, `screens/playerhud.lua:1067`). Pass `nil` for `name` on
+  one-shots; the third argument is a volume multiplier
+  (`widgets/redux/craftingmenu_pinslot.lua:186`).
+- `TheFocalPoint.SoundEmitter:PlaySound(...)` is the positional alternative
+  (`prefabs/world.lua:548`, used at `widgets/widgetutil.lua:147`).
+- HUD sounds sit under the `set_sfx` mixer bus (`scripts/mixes.lua:10`), so they follow
+  the player's FX volume slider (`playerprofile.lua:1720-1723`).
+- Event strings confirmed present in `data/sound/dontstarve.fev`: `dontstarve/HUD/click_move`,
+  `click_mouseover`, `click_negative`, `click_object`, `craft_open`, `craft_close`,
+  `craft_up`, `craft_down`, `research_unlock`, `research_available`, `recipe_ready`,
+  `collect_resource`, `collect_newitem`, `get_gold`, `feed`, `XP_bar_fill_unlock`,
+  `poi_register`; plus `wilson_rework/ui/skill_mastered`, `shadow_skill`, `lunar_skill`,
+  `respec` in `wilson_rework.fev`. (`scripts/haptics.lua:601-624` is Klei's own
+  `category="UI"` list.) **There is no quest/achievement/"complete" event** — pick an
+  existing sting. A `.fev` hit proves the name is in the project string table, not that
+  the path resolves at runtime; every name above also has a live call site in vanilla Lua.
+
+## Widget animation, show/hide and clicks
+
+- **Tweening is built in.** `Widget:MoveTo(from, to, seconds, fn)` (`widgets/widget.lua:179-184`),
+  plus `ScaleTo` (`:166`), `RotateTo` (`:192`), `TintTo` (`:205`) and `CancelMoveTo` (`:173`).
+  Implemented by the `uianim` component with fixed `outCubic` easing
+  (`components/uianim.lua:148-233`). Starting a new `MoveTo` fires the previous pending
+  callback immediately (`uianim.lua:109-111`), and animations keep running while the
+  server is paused (`widget.lua:22,34-44`).
+- `TintTo` requires the widget to have `SetTint` — `Image` does, **`Text` does not**
+  (`uianim.lua:40`); animate text colour with `SetColour` instead.
+- Canonical slide-out/slide-back-in: `widgets/upgrademodulesdisplay.lua:634-648`
+  (`MoveTo` off-screen, `Hide()` **in the completion callback**, `Show()` + `MoveTo` back);
+  crafting menu open/close `widgets/redux/craftingmenu_hud.lua:185,214` (0.25s);
+  inventory bar `widgets/inventorybar.lua:376-391`.
+- **Widgets have no automatic per-frame Update** — the old recursive `Widget:Update` is
+  commented out (`widgets/widget.lua:493-504`). Opt in with `StartUpdating()` /
+  `StopUpdating()` (`widget.lua:485-491`), which register with
+  `TheFrontEnd:StartUpdatingWidget` and call the widget's `OnUpdate(dt)` while enabled
+  (`frontend.lua:888-895`). A mod HUD widget must call `StartUpdating()` itself.
+- `DoTaskInTime` / `DoPeriodicTask` are **EntityScript** methods; the `Widget` class has
+  none. Use `self.inst:DoTaskInTime(...)` / `self.inst:DoPeriodicTask(...)` (vanilla:
+  `widgets/badge.lua:174,188`). The Widget ctor rebinds the inst's tasks to the static
+  scheduler so they keep running while paused (`widget.lua:37-41`).
+- `Show()` / `Hide()` exist (`widgets/widget.lua:311,318`); **there is no `SetShown`**.
+  `Hide()` is instantaneous, so animate first and hide in the callback. `Hide()` does not
+  clear focus — call `ClearFocus()` (`widget.lua:615`) before hiding, since a focused
+  hidden button can still fire from keyboard/controller.
+- **`Widget` has no `SetOnClick`.** Clickable widgets are `Button`/`ImageButton`:
+  `Button:SetOnClick(fn)` (`widgets/button.lua:235`), `ImageButton(atlas, normal, focus,
+  disabled, down, selected, scale, offset)` (`widgets/imagebutton.lua:4`). Vanilla's own
+  collapse toggle is an `ImageButton` with `SetOnClick`
+  (`widgets/redux/craftingmenu_pinbar.lua:32,70-76`). Mark decorative children
+  `SetClickable(false)` (`widget.lua:526`) so they do not swallow hits, and `Disable()` a
+  panel while it animates off-screen.
+- **HUD buttons get focus from the mouse hover, not from `SetFocus`.** Every frame the
+  frontend runs `DoHoverFocusUpdate` (`frontend.lua:932-942`): it takes
+  `TheInput:GetAllEntitiesUnderMouse()`, and `hover_inst.widget:SetFocus()` on the
+  topmost UI entity. `SetFocus` calls `SetFocusFromChild` up the parent chain, which is
+  how `CONTROL_ACCEPT`/`CONTROL_PRIMARY` then reach `Button:OnControl`. Consequences for
+  a mod HUD widget: (a) the button's image quad is the hit region, so size it with
+  `ImageButton:ForceImageSize(w, h)` (`widgets/imagebutton.lua:34-38`); (b) every
+  decorative `Image`/`Text` in the card must be `SetClickable(false)` or it wins the
+  hover and the button never fires.
+- `Widget:Kill()` (`widgets/widget.lua:325`) removes the widget from its parent, kills all
+  children and calls `inst:Remove()`. It is the clean way to tear down dynamic children
+  (e.g. rebuilding HUD rows) before re-adding them — do **not** just drop references.
+- A `Widget` has no `SetSize`; sizing lives on the concrete widget types
+  (`Image:SetSize`, `Text:SetSize`, `NineSlice:SetSize`, `Panel:SetSize`). A plain
+  container `Widget` is zero-size and position-only, so its children's positions are in
+  its local coordinate space.
+- **`Widget:SetScissor(x, y, w, h)`** (`widgets/widget.lua:836`) puts a scissor on the
+  widget's UI transform; children are clipped to it. The rect is anchored **bottom-left**,
+  not centred (`widgets/truescrollarea.lua:27-29`, `widgets/redux/scrapbookscreen.lua:2236`).
+  This is the clean way to draw oversized art: e.g. a side plank texture at its natural
+  aspect (so it is not squashed into a blurry smear) cropped to the panel window. Without
+  it, scaling `side.tex` (44x1023) down to a ~140 px-tall panel is a 7x anisotropic
+  minification and looks visibly soft.
+
+### Installed HUD mods (observed 2026-10-31)
+
+- **Combined Status** (`mods/workshop-1896968971`) scales only
+  `controls.topright_root` to `GetHUDScale() * HUDSCALEFACTOR` (`modmain.lua:350`), and
+  sets the vanilla clock and its own season dial to `0.8` each. Verified in-game with
+  this mod's tracker present: `hudscale=1.11 topright=1.39 seasonclock=1.11`, i.e. the
+  values are exactly Combined Status's own configuration — this mod changes none of them.
+  Its season dial nonetheless looks oversized next to the clock because
+  `scripts/widgets/seasonclock.lua` never applies the `SetScale(0.5)` that vanilla
+  `widgets/uiclock.lua:83` applies to the same 215 px `clock_NIGHT.tex`/`clock_rim.tex`.
+  The dial is therefore ~2x the clock face regardless of any other mod; it is a
+  Combined Status quirk, not a shared-root conflict.
+
+## Client-side persistence (verified, not used here)
+
+- `TheSim:GetPersistentString(filename, cb)` → `cb(success, data)`;
+  `TheSim:SetPersistentString(filename, data, encode, cb)`; also
+  `TheSim:ErasePersistentString` (`scripts/mainfunctions.lua:44-71`). Vanilla client HUD
+  code uses it: `scripts/craftingmenuprofile.lua:41,47`.
+- It works on clients that are **not** the host; files land in the per-account
+  `client_save/` directory. Mods conventionally use `mod_config_data/<Name>`. Do not
+  repurpose `TheSim:SetSetting`/`client.ini` for mod data.
+- This mod deliberately keeps tracker state session-only (no file), so none of this is
+  currently wired up.
 
 ## Entity helpers used by this mod
 

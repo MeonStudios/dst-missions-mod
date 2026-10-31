@@ -6,6 +6,8 @@ local Objectives = require("guidedmissions/objectives")
 local Netvars = require("guidedmissions/netvars")
 local Settings = require("guidedmissions/settings")
 
+local HOLD_SECONDS = 3
+
 local function FindMissionIndexById(id)
     for i, mission in ipairs(Missions) do
         if mission.id == id then
@@ -13,6 +15,29 @@ local function FindMissionIndexById(id)
         end
     end
     return nil
+end
+
+-- Rows are `label|prefab|counter|done` joined by `;`, so the separators must
+-- never appear inside the free-form label.
+local function SanitiseLabel(text)
+    return (tostring(text or ""):gsub("[|;]", " "))
+end
+
+-- Pack the mission's objectives into the client's row format. `force_done`
+-- renders every row as complete for the 3-second completion hold.
+local function FormatRows(mission, progress, force_done)
+    local rows = {}
+    for i, objective in ipairs(mission.objectives or {}) do
+        local value = progress[i] or 0
+        local done = (force_done or Objectives.IsComplete(objective, value)) and 1 or 0
+        rows[#rows + 1] = table.concat({
+            SanitiseLabel(Objectives.GetLabel(objective)),
+            Objectives.GetIconPrefab(objective) or "",
+            Objectives.GetCounter(objective, value),
+            tostring(done),
+        }, "|")
+    end
+    return table.concat(rows, ";")
 end
 
 local GuidedMissionManager = Class(function(self, inst)
@@ -159,8 +184,17 @@ function GuidedMissionManager:CompleteCurrentMission()
         return
     end
 
-    -- This mod is informational only: completing a mission never changes game
-    -- state. Clear the active mission so completion cannot be re-entered.
+    -- Show the completed card before clearing state. This mod is informational
+    -- only: completing a mission never changes game state.
+    Netvars.Write(self.inst, {
+        title = mission.title or "Mission",
+        subtext = mission.subtext or "",
+        rows = FormatRows(mission, self.progress, true),
+        state = "won",
+    })
+
+    -- Clearing the mission makes objective events and the poller ignore
+    -- progress for the duration of the hold.
     self.current_mission = nil
     self.progress = {}
 
@@ -170,15 +204,26 @@ function GuidedMissionManager:CompleteCurrentMission()
         mission.title or "Untitled"
     ))
 
-    self:SetMission(self.mission_index + 1)
+    if self.hold_task ~= nil then
+        self.hold_task:Cancel()
+        self.hold_task = nil
+    end
+
+    local next_index = self.mission_index + 1
+    self.mission_index = next_index
+    self.hold_task = self.inst:DoTaskInTime(HOLD_SECONDS, function()
+        self.hold_task = nil
+        self:SetMission(next_index)
+    end)
 end
 
 function GuidedMissionManager:Sync()
     if self.completed then
         Netvars.Write(self.inst, {
-            title = "Guided Missions",
-            objectives = "All missions complete!",
-            footer = "",
+            title = "All Missions Complete",
+            subtext = "You survived. For now.",
+            rows = "",
+            state = "done",
         })
         return
     end
@@ -188,15 +233,11 @@ function GuidedMissionManager:Sync()
         return
     end
 
-    local lines = {}
-    for i, objective in ipairs(mission.objectives or {}) do
-        lines[#lines + 1] = Objectives.GetStatusLine(objective, self.progress[i] or 0)
-    end
-
     Netvars.Write(self.inst, {
         title = mission.title or "Mission",
-        objectives = table.concat(lines, "\n"),
-        footer = string.format("Mission %d of %d", self.mission_index, #Missions),
+        subtext = mission.subtext or "",
+        rows = FormatRows(mission, self.progress, false),
+        state = "active",
     })
 end
 
@@ -259,6 +300,11 @@ function GuidedMissionManager:OnRemoveFromEntity()
     if self.poll_task ~= nil then
         self.poll_task:Cancel()
         self.poll_task = nil
+    end
+
+    if self.hold_task ~= nil then
+        self.hold_task:Cancel()
+        self.hold_task = nil
     end
 end
 

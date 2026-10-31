@@ -3,10 +3,11 @@ local GLOBAL = _G
 
 local Objectives = {}
 
+-- Labels never carry a count: the tracker renders the counter separately.
 local DEFAULT_LABELS = {
-    collect = "Collect %d x %s",
-    build = "Build %d x %s",
-    kill = "Kill %d x %s",
+    collect = "Collect %s",
+    build = "Build %s",
+    kill = "Kill %s",
     survive = "Survive until day %d",
 }
 
@@ -45,23 +46,28 @@ function Objectives.GetLabel(objective)
         return "Unknown objective: " .. tostring(objective_type)
     end
 
-    return string.format(
-        pattern,
-        tonumber(objective.count) or 1,
-        PrefabDisplayName(objective.prefab)
-    )
+    return string.format(pattern, PrefabDisplayName(objective.prefab))
 end
 
-function Objectives.GetStatusLine(objective, progress)
-    local label = Objectives.GetLabel(objective)
-
+-- The pre-formatted counter shown on the right of a tracker row.
+function Objectives.GetCounter(objective, progress)
     if objective.type == "survive" then
-        return string.format("%s (day %d)", label, Objectives.GetCurrentDay())
+        local target = tonumber(objective.day) or 1
+        return string.format("Day %d/%d", Objectives.GetCurrentDay(), target)
     end
 
     local target = tonumber(objective.count) or 1
     local value = math.min(tonumber(progress) or 0, target)
-    return string.format("%s (%d/%d)", label, value, target)
+    return string.format("%d/%d", value, target)
+end
+
+-- The prefab whose inventory icon illustrates this objective, or nil when the
+-- objective has no item icon (survive rows render text-only).
+function Objectives.GetIconPrefab(objective)
+    if objective.type == "collect" or objective.type == "build" or objective.type == "kill" then
+        return objective.prefab
+    end
+    return nil
 end
 
 function Objectives.IsComplete(objective, progress)

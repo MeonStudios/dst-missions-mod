@@ -35,7 +35,27 @@ if not GLOBAL.TheNet:IsDedicated() and Settings.show_tracker then
             end
 
             local MissionTracker = require("widgets/guidedmissiontracker")
-            player._guidedmissiontracker = player.HUD.root:AddChild(MissionTracker(player))
+
+            -- Dock to the vanilla top-right HUD scaling root so the card shares
+            -- the HUD's anchors and size setting (the widget itself stays a
+            -- plain child and must not scale on its own, or it compounds).
+            -- The top-right corner is where the clock and the health/hunger/
+            -- sanity badges live (controls.sidepanel), so the card hugs them
+            -- instead of fighting the insight button and gift toasts on the left.
+            local controls = player.HUD.controls
+            local parent = controls ~= nil and controls.topright_root or nil
+            if parent == nil then
+                -- Should not happen: SetMainCharacter builds controls before
+                -- playeractivated. Keep a top-right dock as a safety net.
+                local Widget = require("widgets/widget")
+                parent = player.HUD.root:AddChild(Widget("guidedmission_dock"))
+                parent:SetHAnchor(GLOBAL.ANCHOR_RIGHT)
+                parent:SetVAnchor(GLOBAL.ANCHOR_TOP)
+                parent:SetScaleMode(GLOBAL.SCALEMODE_PROPORTIONAL)
+                parent:SetMaxPropUpscale(GLOBAL.MAX_HUD_SCALE)
+            end
+
+            player._guidedmissiontracker = parent:AddChild(MissionTracker(player))
         end)
     end)
 end

@@ -14,15 +14,18 @@ Lua 5.1/LuaJIT semantics. No build step: this directory *is* the mod folder.
 | `scripts/guidedmissions/objectives.lua` | Objective labels, progress, matching, completion. |
 | `scripts/guidedmissions/netvars.lua` | Every netvar name plus the attach/read/write helpers. |
 | `scripts/guidedmissions/settings.lua` | Runtime settings, populated from mod options in `modmain.lua`. |
-| `scripts/widgets/guidedmissiontracker.lua` | Client HUD. Text-only, vanilla fonts. |
+| `scripts/widgets/guidedmissiontracker.lua` | Client HUD. Renders the netvar string contract as a mission card (crafting-menu frame, item icons, green checks); no game logic. |
+| `tests/manager_test.lua` | Plain-Lua logic harness for the server manager. Stubs DST globals and replays the full chain; never loaded by the game. |
+| `tests/preview/` | Offline HUD preview: runs the real tracker with stubbed widgets and renders PNGs from the game's atlases/fonts. |
 
 ## Invariants — breaking these breaks the mod
 
 - **Netvars must be declared identically on server and every client**, or entity
   deserialization fails. `netvars.Attach` runs unconditionally on both sides; never skip
   it on one side, even when the tracker is disabled for that player.
-- **Authority is server-side.** The server writes `title`, `objectives`, and `footer` as
-  netvar strings; clients only render them and never send progress back.
+- **Authority is server-side.** The server writes `title`, `subtext`, `rows`, and `state`
+  as netvar strings; clients only render them and never send progress back. The HUD is a
+  renderer of that string contract, not a second source of truth.
 - **Information only — no gameplay impact.** The mod observes events and world state and
   displays guidance. It must never spawn items, grant rewards, modify stats, or otherwise
   change game state. Mission completion only advances the tracker.
@@ -66,6 +69,33 @@ elevated prompt. It only helps this machine; other players need their own copy.
 
   Exit 0 with no output = every file parses. Use `luac`, not `lua`: bare `lua` fails in
   Git Bash because the install's `lua/` module directory shadows `lua.exe` on `PATH`.
+
+- **Run the manager harness** when touching the manager, objective helpers, netvars, or
+  the mission chain. It runs the real modules with stubbed engine globals, replays every
+  mission (including the 3-second hold, the `done` payload, save/load, and task cleanup),
+  and exits non-zero on failure:
+
+  ```bash
+  "/c/Program Files (x86)/Lua/5.1/lua.exe" tests/manager_test.lua
+  ```
+
+  It is a logic check only — rendering, netvar replication, and engine API behavior are
+  still verified only by a human running the game.
+
+- **Preview the HUD without launching the game.** `tests/preview` runs the *real*
+  `widgets/guidedmissiontracker.lua` with stubbed widget classes, dumps its draw tree,
+  and renders PNGs using the game's actual KTEX atlases and BMFont glyphs:
+
+  ```bash
+  sh tests/preview/run.sh
+  ```
+
+  Outputs `tests/preview/out/{active_2row,active_1row,won,done,collapsed}.png`. Requires
+  Pillow (`pip install pillow`). The game data path defaults to the Steam install and is
+  overridable with `--game-data` or `DST_DATA`. Because it records the real widget, layout
+  changes show up without duplicating constants. It does not exercise input, netvars, or
+  the engine's exact glyph hinting — those still need an in-game run. Add a scenario in
+  `tests/preview/dump.lua` when you need another state.
 
   This is a **parser check only** — it does not execute the mod, so it will not catch
   runtime errors, wrong engine-API assumptions, or `strict.lua` undeclared-global errors.

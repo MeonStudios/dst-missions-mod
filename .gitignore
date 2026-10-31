@@ -3,3 +3,8 @@
 *.zip
 .DS_Store
 Thumbs.db
+
+# Preview renders and the dump between the Lua and Python stages
+tests/preview/out/
+tests/preview/out.json
+docs/mission-ideas.md

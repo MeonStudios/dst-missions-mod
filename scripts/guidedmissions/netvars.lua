@@ -14,18 +14,20 @@ local Netvars = {}
 Netvars.DIRTY_EVENT = "guidedmissionsdirty"
 
 -- Fixed order: netvars must be declared in the same order on server and client.
-local FIELDS = { "title", "objectives", "footer" }
+local FIELDS = { "title", "subtext", "rows", "state" }
 
 local FIELD_VARS = {
     title = "_guidedmissions_title",
-    objectives = "_guidedmissions_objectives",
-    footer = "_guidedmissions_footer",
+    subtext = "_guidedmissions_subtext",
+    rows = "_guidedmissions_rows",
+    state = "_guidedmissions_state",
 }
 
 local FIELD_NAMES = {
     title = "guidedmissions.title",
-    objectives = "guidedmissions.objectives",
-    footer = "guidedmissions.footer",
+    subtext = "guidedmissions.subtext",
+    rows = "guidedmissions.rows",
+    state = "guidedmissions.state",
 }
 
 function Netvars.Attach(inst)
