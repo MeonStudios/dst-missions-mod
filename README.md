@@ -24,7 +24,6 @@ Missions run top to bottom. Restart the server (or disable/enable the mod) after
     objectives = {
         { type = "collect", prefab = "log", count = 10, label = "Collect 10 logs" },
     },
-    reward = { { prefab = "axe", count = 1 } }, -- optional
 }
 ```
 
@@ -37,12 +36,14 @@ Supported objective types:
 | `kill`    | `prefab`, `count` | the player kills `count` of the prefab |
 | `survive` | `day`             | the world reaches that day |
 
-`label` and `reward` are optional. `collect` counts items the player already has when the
+`label` is optional. `collect` counts items the player already has when the
 mission starts. Prefab ids are the game's internal ids (e.g. `log`, `torch`, `firepit`,
 `researchlab` for the Science Machine).
 
 ## How it plays
 
+- The mod is purely informational: it never grants items, changes stats, or alters
+  gameplay. It only observes what players do and shows guidance.
 - The tracker appears at the top-left for every player, showing the active mission and
   objective progress.
 - Missions advance automatically when all objectives are complete.
@@ -74,9 +75,3 @@ mission starts. Prefab ids are the game's internal ids (e.g. `log`, `torch`, `fi
 Mission sets selectable via mod options; admin commands to skip or reset a mission;
 shared progress; `visit`, `feed`, `craft recipe`, and `give item` objective types; an
 external JSON mission loader.
-
-## Development
-
-No build step is required. Architecture, invariants, conventions, and the testing loop
-are in [`CLAUDE.md`](CLAUDE.md); verified DST API details are in
-[`docs/dst-api.md`](docs/dst-api.md).

@@ -42,6 +42,7 @@ processes, takes minutes, and is the slowest way to answer anything.
 | Widget methods | `scripts/widgets/widget.lua`, `text.lua`, `image.lua` |
 | Netvar types and dirty-event docs | `scripts/netvars.lua` (constructors are engine-bound) |
 | Atlases and `.tex` files | `data/databundles/images.zip` (not `data/images/`) |
+| Performance / profiling | `scripts/profiler.lua`, `perfutil.lua`, `consolecommands.lua` |
 
 If a signature is in doubt, check here rather than guessing — DST's API is loosely
 documented and version-dependent.
@@ -121,12 +122,54 @@ documented and version-dependent.
 
 ## Entity helpers used by this mod
 
-- `inventory:ForEachItem(fn, ...)` (`components/inventory.lua:667`) and
-  `inventory:GiveItem(item, slot, src_pos)` (`:1029`).
+- `inventory:ForEachItem(fn, ...)` (`components/inventory.lua:667`).
 - `stackable:StackSize()` (`components/stackable.lua:59`).
-- `SpawnPrefab(prefab)` is engine-bound and server-side only.
+
+## Performance measurement (verified tooling)
+
+- `gamelogic.lua:10` requires `perfutil.lua`, so `CountEntities()` is defined in the
+  **server** Lua state. It walks `Ents` — loaded entities only — and prints totals plus
+  a per-prefab breakdown. `c_countprefabs(prefab)` (`consolecommands.lua:905`) returns
+  a single count the same way. Counts move with player position because DST unloads
+  distant entities.
+- `c_netstats()` (`consolecommands.lua:1231`) prints `TheNet:GetNetworkStatistics()`;
+  the keys are engine-defined, so print them once before writing a parser.
+- `main.lua:226` requires `profiler.lua`, so `newProfiler(method, sampledelay)`,
+  `:start()`, `:stop()` and `:report()` are globals in **both** Lua states.
+  `report()` returns a string (it does not write a file); call `print(profiler:report())`
+  from the console. Time mode costs roughly 10% while running (`profiler.lua:32-35`).
+  It profiles the whole state, so look for `guidedmissions/*` frames in the output.
+- `profiler.lua:3` does `os.clock = walltime`. `walltime` is engine-bound (no Lua
+  definition); it is the wall-clock timer to use for timing one function call.
+- `GetTime()` is `TheSim:GetTick() * ticktime` (`mainfunctions.lua:590-593`). It is
+  tick-based, so it does **not** advance inside a single tick — never use it to time a
+  function call. Use `walltime` instead.
+- Debug keys are dev-build only: `CHEATS_ENABLED = CONFIGURATION ~= "PRODUCTION"`
+  (`main.lua:63`) and `debugkeys.lua` is required only when that holds
+  (`main.lua:541-543`). Retail therefore has no Ctrl+F1 perf graph
+  (`TheSim:TogglePerfGraph`, `debugkeys.lua:281-285`) and no Alt+KP_Divide frame
+  profiler (`TheSim:ToggleFrameProfiler`, `debugkeys.lua:1242-1245`). The `TheSim:*`
+  methods are engine-bound; calling them from the console may work, but these scripts
+  do not guarantee it.
 
 ## Language
 
-DST is Lua 5.1 / LuaJIT: no `goto`, no `//` integer division, and a trimmed standard
-library. Stay within that.
+DST uses Lua 5.1 with a trimmed standard library: no `goto`, no `//` integer division,
+no bitwise operators, no `table.pack`. Stay within that.
+
+**Verified 2026-10-31 on Windows:** the shipped executables embed vanilla **Lua 5.1.4**,
+not LuaJIT — all four of `bin/dontstarve_steam.exe`, `bin64/dontstarve_steam_x64.exe`,
+`bin/dontstarve_dedicated_server_nullrenderer.exe`, and
+`bin64/dontstarve_dedicated_server_nullrenderer_x64.exe` contain the string `Lua 5.1.4`
+and no `LuaJIT` string. Check from a shell:
+
+```bash
+grep -a -o -m1 "Lua [0-9.]*" "<steam>/bin/dontstarve_steam.exe"
+grep -a -m1 "LuaJIT" "<steam>/bin/dontstarve_steam.exe" || echo "no LuaJIT"
+```
+
+Check at runtime in the in-game console (`~`), which uses the same Lua state as mod code.
+Run it once in the client state and once in the server state (dedicated servers may
+differ): `print(_VERSION)` prints `Lua 5.1`; `print(jit and jit.version or "no LuaJIT")`
+distinguishes vanilla from LuaJIT. A non-Windows/dedicated build should be re-verified
+this way rather than assumed.

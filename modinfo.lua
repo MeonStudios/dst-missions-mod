@@ -1,6 +1,6 @@
 name = "Guided Missions"
-description = "Configurable server-authoritative mission chains that guide players through a playthrough."
-author = "matti"
+description = "Information-only mission chains that guide players through a playthrough."
+author = "PinkNeonDino"
 version = "0.1.0"
 
 -- Don't Starve Together mod API version.

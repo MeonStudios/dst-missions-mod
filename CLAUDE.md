@@ -23,6 +23,9 @@ Lua 5.1/LuaJIT semantics. No build step: this directory *is* the mod folder.
   it on one side, even when the tracker is disabled for that player.
 - **Authority is server-side.** The server writes `title`, `objectives`, and `footer` as
   netvar strings; clients only render them and never send progress back.
+- **Information only — no gameplay impact.** The mod observes events and world state and
+  displays guidance. It must never spawn items, grant rewards, modify stats, or otherwise
+  change game state. Mission completion only advances the tracker.
 - **Save state is keyed by mission id, not array index**, so inserting or reordering
   missions does not corrupt existing progress. Ids must be unique and stable.
 - **Cancel periodic tasks in `OnRemoveFromEntity`.**
@@ -54,8 +57,19 @@ live in-game immediately:
 junction is missing (e.g. after a reinstall), recreate it with `mklink /J` from an
 elevated prompt. It only helps this machine; other players need their own copy.
 
-- Syntax check: `luac -p <file>` if available. DST bundles no standalone interpreter, so
-  otherwise the game log is the first check. See **Troubleshooting** below.
+- **Run the syntax check after every change**, before asking the user to test in-game.
+  Lua 5.1 is installed (`C:\Program Files (x86)\Lua\5.1`) and `luac` is on `PATH`:
+
+  ```bash
+  luac -p $(find . -name "*.lua" -not -path "./.git/*")
+  ```
+
+  Exit 0 with no output = every file parses. Use `luac`, not `lua`: bare `lua` fails in
+  Git Bash because the install's `lua/` module directory shadows `lua.exe` on `PATH`.
+
+  This is a **parser check only** — it does not execute the mod, so it will not catch
+  runtime errors, wrong engine-API assumptions, or `strict.lua` undeclared-global errors.
+  Those still require the in-game run below. See **Troubleshooting**.
 - Host console: `c_save()` to test `OnSave`/`OnLoad`, `c_reset()` for a fresh world.
 - Mission state is stored on players, so an existing save retains old progress —
   regenerate the world for a clean test. Test with two or more players where possible.

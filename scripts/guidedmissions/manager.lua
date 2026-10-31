@@ -159,8 +159,8 @@ function GuidedMissionManager:CompleteCurrentMission()
         return
     end
 
-    -- Clear the active mission BEFORE giving rewards. GiveItem fires the
-    -- "itemget" event synchronously, and that must not re-enter completion.
+    -- This mod is informational only: completing a mission never changes game
+    -- state. Clear the active mission so completion cannot be re-entered.
     self.current_mission = nil
     self.progress = {}
 
@@ -170,33 +170,7 @@ function GuidedMissionManager:CompleteCurrentMission()
         mission.title or "Untitled"
     ))
 
-    self:GiveRewards(mission)
-
     self:SetMission(self.mission_index + 1)
-end
-
-function GuidedMissionManager:GiveRewards(mission)
-    if mission.reward == nil then
-        return
-    end
-
-    for _, reward in ipairs(mission.reward) do
-        if reward.prefab ~= nil then
-            local count = tonumber(reward.count) or 1
-            for _ = 1, count do
-                local item = GLOBAL.SpawnPrefab(reward.prefab)
-                if item ~= nil then
-                    local pos = self.inst:GetPosition()
-                    item.Transform:SetPosition(pos.x, pos.y, pos.z)
-                    if self.inst.components.inventory ~= nil then
-                        self.inst.components.inventory:GiveItem(item)
-                    end
-                else
-                    print("[Guided Missions] Unknown reward prefab: " .. tostring(reward.prefab))
-                end
-            end
-        end
-    end
 end
 
 function GuidedMissionManager:Sync()

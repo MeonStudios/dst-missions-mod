@@ -9,8 +9,8 @@
 --   kill:    prefab, count  -> kill `count` of `prefab`
 --   survive: day            -> reach this absolute world day
 --
--- `label` is optional. `reward` is optional: items are spawned and given to the
--- player when the mission is completed (overflow drops at the player's feet).
+-- `label` is optional. Missions are informational only: completing one gives
+-- no items or other in-game benefit.
 
 return {
     {
@@ -18,9 +18,6 @@ return {
         title = "Gather Wood",
         objectives = {
             { type = "collect", prefab = "log", count = 10, label = "Collect 10 logs" },
-        },
-        reward = {
-            { prefab = "axe", count = 1 },
         },
     },
     {
@@ -58,9 +55,6 @@ return {
         objectives = {
             { type = "kill", prefab = "spider", count = 3, label = "Kill 3 spiders" },
         },
-        reward = {
-            { prefab = "healingsalve", count = 1 },
-        },
     },
     {
         id = "prospector",
@@ -74,9 +68,6 @@ return {
         title = "Science!",
         objectives = {
             { type = "build", prefab = "researchlab", count = 1, label = "Build a Science Machine" },
-        },
-        reward = {
-            { prefab = "goldnugget", count = 1 },
         },
     },
 }
