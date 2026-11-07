@@ -101,8 +101,11 @@ elevated prompt. It only helps this machine; other players need their own copy.
   runtime errors, wrong engine-API assumptions, or `strict.lua` undeclared-global errors.
   Those still require the in-game run below. See **Troubleshooting**.
 - Host console: `c_save()` to test `OnSave`/`OnLoad`, `c_reset()` for a fresh world.
-- Mission state is stored on players, so an existing save retains old progress —
-  regenerate the world for a clean test. Test with two or more players where possible.
+- Mission state is stored on players, so an existing save retains old progress.
+  As an admin/host, open the console (`~`) and run `c_resetmissions()` to restart
+  your chain from mission 1, or `c_setmission(n)` (1-based) to jump to any
+  mission, without regenerating the world (`modmain.lua` →
+  `GuidedMissionManager:JumpTo`). Test with two or more players where possible.
 
 ## Troubleshooting (read this before debugging)
 

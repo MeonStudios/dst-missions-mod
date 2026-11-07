@@ -74,7 +74,8 @@ STRINGS = { NAMES = {
     RESEARCHLAB = "Science Machine",
 } }
 TheWorld = { state = { cycles = 0 } }
-TheNet = { Announce = function() end }
+local announcements = {}
+TheNet = { Announce = function(_, message) announcements[#announcements + 1] = message end }
 
 -- Keep the manager's announce chatter out of the PASS/FAIL output.
 local real_print = print
@@ -131,9 +132,19 @@ end
 local function NewInst(guid)
     local inst = {
         GUID = guid,
-        components = { inventory = { ForEachItem = function() end } },
+        components = {},
         _listeners = {},
         _tasks = {},
+        -- Items the player carries. Collect objectives are derived from this,
+        -- not from events (see objectives.lua ReconcileProgress).
+        items = {},
+    }
+    inst.components.inventory = {
+        ForEachItem = function(_, fn)
+            for _, item in ipairs(inst.items) do
+                fn(item)
+            end
+        end,
     }
     function inst:ListenForEvent(event, fn)
         self._listeners[event] = self._listeners[event] or {}
@@ -165,6 +176,7 @@ end
 
 local Netvars = require("guidedmissions/netvars")
 local Manager = require("guidedmissions/manager")
+local Missions = require("guidedmissions/missions")
 
 Netvars.Attach(inst)
 local manager = Manager(inst)
@@ -205,6 +217,15 @@ local function Build(prefab)
     return { recipe = { name = prefab }, item = { prefab = prefab, components = {} } }
 end
 
+-- Add a stack of `prefab` to the player's inventory. The collect poller reads
+-- this, which is how real pickups register (events do not carry them).
+local function Carry(target, prefab, count)
+    target.items[#target.items + 1] = {
+        prefab = prefab,
+        components = { stackable = { StackSize = function() return count end } },
+    }
+end
+
 -- 1. startup: the first mission is active with both rows and zero counters.
 Advance(1)
 local state = Read()
@@ -216,32 +237,42 @@ Check("startup row1 label", Rows(state["guidedmissions.rows"])[1][1] == "Collect
 Check("startup row1 prefab", Rows(state["guidedmissions.rows"])[1][2] == "flint")
 Check("startup row1 counter", Rows(state["guidedmissions.rows"])[1][3] == "0/3")
 Check("startup row2 counter", Rows(state["guidedmissions.rows"])[2][3] == "0/2")
+Check("mission start not announced in chat", #announcements == 0)
 
--- 2. Partial progress ticks without completing.
-inst:Fire("itemget", Item("flint", 2))
+-- 2. Partial progress ticks without completing. Collect progress is read from
+-- the inventory on the poll; events never add to it.
+Carry(inst, "flint", 2)
+Advance(1)
 state = Read()
 Check("partial counter 2/3", Rows(state["guidedmissions.rows"])[1][3] == "2/3")
 Check("still active", state["guidedmissions.state"] == "active")
 
 -- 3. Completion writes the `won` payload with every row forced done.
-inst:Fire("itemget", Item("flint", 1))
-inst:Fire("itemget", Item("twigs", 2))
+Carry(inst, "flint", 1)
+Carry(inst, "twigs", 2)
+Advance(1)
 state = Read()
 Check("mission1 won", state["guidedmissions.state"] == "won")
 Check("won row1 done", Rows(state["guidedmissions.rows"])[1][4] == "1")
 Check("won row2 done", Rows(state["guidedmissions.rows"])[2][4] == "1")
 Check("won row1 counter full", Rows(state["guidedmissions.rows"])[1][3] == "3/3")
+Check("completion announced in chat",
+    announcements[#announcements] == "Wilson completed: Basic Supplies")
 
--- Progress during the hold is ignored.
-inst:Fire("itemget", Item("log", 1))
+-- Progress during the hold is ignored: there is no current mission, so even
+-- the inventory poll has nothing to update.
+Carry(inst, "twigs", 5)
+Advance(1)
 Check("hold still won", Read()["guidedmissions.state"] == "won")
 
--- 4. After the hold the next mission starts.
+-- 4. After the hold the next mission starts, quietly.
+local announce_count = #announcements
 Advance(3)
 state = Read()
 Check("mission2 active", state["guidedmissions.state"] == "active")
 Check("mission2 title", state["guidedmissions.title"] == "A Wooden Start")
 Check("mission2 rows count 1", #Rows(state["guidedmissions.rows"]) == 1)
+Check("mission start not announced in chat", #announcements == announce_count)
 
 local function Complete(label)
     Check(label .. " won", Read()["guidedmissions.state"] == "won")
@@ -249,12 +280,15 @@ local function Complete(label)
 end
 
 -- 5. A Wooden Start
-inst:Fire("itemget", Item("log", 10))
+Carry(inst, "log", 10)
+Advance(1)
 Complete("mission2")
 state = Read()
 Check("mission3 title", state["guidedmissions.title"] == "Light the Night")
 
--- 6. Light the Night
+-- 6. Light the Night: a torch is an inventory item, so only `builditem` counts.
+inst:Fire("buildstructure", Build("torch"))
+Check("craft ignores buildstructure", Read()["guidedmissions.state"] == "active")
 inst:Fire("builditem", Build("torch"))
 Complete("mission3")
 state = Read()
@@ -271,8 +305,12 @@ Complete("mission4")
 state = Read()
 Check("mission5 title", state["guidedmissions.title"] == "A Proper Camp")
 
--- 8. A Proper Camp
+-- 8. A Proper Camp. A firepit is a structure, not an inventory item, so the
+-- engine fires `buildstructure` (builder.lua), never `builditem`; the craft
+-- event must not satisfy a build objective.
 inst:Fire("builditem", Build("firepit"))
+Check("build ignores builditem", Read()["guidedmissions.state"] == "active")
+inst:Fire("buildstructure", Build("firepit"))
 Complete("mission5")
 
 -- 9. Clear the Nest
@@ -284,13 +322,17 @@ state = Read()
 Check("mission7 title", state["guidedmissions.title"] == "Prospector")
 
 -- 10. Prospector
-inst:Fire("itemget", Item("goldnugget", 3))
+Carry(inst, "goldnugget", 3)
+Advance(1)
 Complete("mission7")
 state = Read()
 Check("mission8 title", state["guidedmissions.title"] == "Science!")
 
--- 11. Science!: the last mission ends in the terminal `done` payload.
+-- 11. Science!: the last mission ends in the terminal `done` payload. The
+-- Science Machine is also a structure (`buildstructure`).
 inst:Fire("builditem", Build("researchlab"))
+Check("build ignores builditem (researchlab)", Read()["guidedmissions.state"] == "active")
+inst:Fire("buildstructure", Build("researchlab"))
 Complete("mission8")
 state = Read()
 Check("final state done", state["guidedmissions.state"] == "done")
@@ -322,6 +364,57 @@ end
 -- Three tasks were created: begin, poll, hold. Begin already ran to completion.
 Check("all tasks cancelled on remove", live_tasks == 0 and #inst2._tasks == 3)
 Check("hold_task cleared", manager2.hold_task == nil)
+
+-- 14. Inventory reconciliation: a pickup that stacks into an existing stack
+-- fires no `itemget` (and no other player event), so only the poll can see it.
+local inst3 = NewInst(9012)
+Netvars.Attach(inst3)
+local manager3 = Manager(inst3)
+Advance(1)
+Check("reconcile starts at 0/2", Rows(Read(inst3)["guidedmissions.rows"])[2][3] == "0/2")
+
+-- Two twigs arrive in one inventory stack, with no event fired at all.
+Carry(inst3, "twigs", 2)
+Advance(1)
+local rows3 = Rows(Read(inst3)["guidedmissions.rows"])
+Check("reconcile counts stacked twigs", rows3[2][3] == "2/2")
+Check("reconcile still active", Read(inst3)["guidedmissions.state"] == "active")
+
+-- `itemget` must not grant progress. GiveActiveItem re-fires it every time an
+-- item is clicked onto the cursor, which was the counter-inflation exploit.
+inst3:Fire("itemget", Item("flint", 3))
+inst3:Fire("itemget", Item("flint", 3))
+rows3 = Rows(Read(inst3)["guidedmissions.rows"])
+Check("itemget cannot inflate flint", rows3[1][3] == "0/3")
+Check("itemget cannot complete mission", Read(inst3)["guidedmissions.state"] == "active")
+
+Carry(inst3, "flint", 3)
+Advance(1)
+Check("reconcile completes mission", Read(inst3)["guidedmissions.state"] == "won")
+
+-- 15. Reset (the /resetmissions command) abandons the completion hold and
+-- restarts at mission 1. With an empty inventory the counters are back to zero.
+inst3.items = {}
+manager3:Reset()
+Check("reset title", Read(inst3)["guidedmissions.title"] == "Basic Supplies")
+Check("reset state active", Read(inst3)["guidedmissions.state"] == "active")
+Check("reset row1 counter", Rows(Read(inst3)["guidedmissions.rows"])[1][3] == "0/3")
+Check("reset row2 counter", Rows(Read(inst3)["guidedmissions.rows"])[2][3] == "0/2")
+
+-- 16. JumpTo (/setmission) goes straight to a mission, rejects out-of-range
+-- indices, and can show the terminal completion state.
+Check("jump to mission 5 accepted", manager3:JumpTo(5))
+Check("jump title", Read(inst3)["guidedmissions.title"] == "A Proper Camp")
+Check("jump state active", Read(inst3)["guidedmissions.state"] == "active")
+Check("jump to mission 5 counter", Rows(Read(inst3)["guidedmissions.rows"])[1][3] == "0/1")
+
+Check("jump rejects 0", manager3:JumpTo(0) == false)
+Check("jump rejects past the end", manager3:JumpTo(#Missions + 2) == false)
+Check("jump rejects text", manager3:JumpTo("abc") == false)
+Check("rejected jump changes nothing", Read(inst3)["guidedmissions.title"] == "A Proper Camp")
+
+Check("jump to completion accepted", manager3:JumpTo(#Missions + 1))
+Check("jump completion state", Read(inst3)["guidedmissions.state"] == "done")
 
 print(failures == 0 and "ALL PASS" or ("FAILURES: " .. failures))
 os.exit(failures == 0 and 0 or 1)

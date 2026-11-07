@@ -5,9 +5,15 @@
 --
 -- Objective types:
 --   collect: prefab, count  -> acquire `count` of `prefab` (starting inventory counts)
---   build:   prefab, count  -> build `count` of `prefab`
+--   craft:   prefab, count  -> craft `count` of `prefab` into the inventory
+--   build:   prefab, count  -> build `count` of a structure `prefab` in the world
 --   kill:    prefab, count  -> kill `count` of `prefab`
 --   survive: day            -> reach this absolute world day
+--
+-- `craft` and `build` listen to different engine events: `builditem` fires for
+-- products that can sit in the inventory (torch, spear); `buildstructure` fires
+-- for things placed in the world (firepit, researchlab). Use the wrong type for
+-- a prefab and that objective will never complete.
 --
 -- `label` is optional and carries no count: the tracker renders the counter
 -- separately (for example "Collect logs" with "0/10" beside it). `subtext` is
@@ -39,7 +45,7 @@ return {
         title = "Light the Night",
         subtext = "The dark is not your friend. Probably.",
         objectives = {
-            { type = "build", prefab = "torch", count = 1, label = "Craft a torch" },
+            { type = "craft", prefab = "torch", count = 1, label = "Craft a torch" },
         },
     },
     {
