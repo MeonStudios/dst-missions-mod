@@ -68,6 +68,17 @@ documented and version-dependent.
   `local GLOBAL = GLOBAL` in a module fails the whole mod with
   `variable 'GLOBAL' is not declared`. Use `local GLOBAL = _G` in those files:
   it is the same table that modmain's `GLOBAL` points at.
+- **The mod env is a whitelist with no `_G` fallback** (`mods.lua`
+  `CreateEnvironment`, ~line 263). It contains only `pairs`, `ipairs`, `print`,
+  `math`, `table`, `type`, `string`, `tostring`, `require`, `Class`, plus the mod
+  globals injected by `modutil.InsertPostInitFunctions` and `GLOBAL = _G`; there is
+  no metatable. `tonumber` in particular is **absent**. A function defined in
+  `modmain.lua` keeps this env when it is later called from the debug console, so a
+  console command that calls bare `tonumber` dies with
+  `attempt to call global 'tonumber' (a nil value)` even though the same call works
+  in a `require()`d module (those run in the standard `_G`). Reach missing base
+  functions through `GLOBAL` (verified in-game 2026-11-07: this broke
+  `c_setmission(n)` while `c_resetmissions()` worked).
 - `AddPlayerPostInit` is defined in `modutil.lua` (~line 586) as
   `AddPrefabPostInitAny` plus a `player` tag filter; it runs on server and client.
 
@@ -75,14 +86,67 @@ documented and version-dependent.
 
 - Event payloads, all pushed on the player that acted:
   - `itemget` → `{ item = <entity>, slot = ..., src_pos = ... }`, pushed by
-    `components/inventory.lua` (~lines 1020 and 1151).
+    `components/inventory.lua` at two places, and neither matches "the player just
+    acquired something":
+    - `Inventory:GiveItem` pushes it only when the item lands in an *empty*
+      inventory slot (line 1151). A pickup that merges into an existing stack goes
+      through `stackable:Put` and fires **nothing**, so events alone under-count
+      repeated pickups of a stackable resource. Harvesting and bush-picking go
+      through the same `GiveItem` (`components/pickable.lua` ~486/509,
+      `components/harvestable.lua` ~206), which is why stacked bush picks are silent.
+    - `Inventory:GiveActiveItem` (line 1020, `slot = nil`) fires it every time an
+      item is clicked onto the cursor, and giving it back fires it again — so
+      accumulating stack size on `itemget` lets a player inflate a counter by
+      clicking their own inventory repeatedly. **Never accumulate collect progress
+      from `itemget`.** `collect` objectives are inventory-derived: the poller takes
+      the peak `inventory:ForEachItem` count (see `objectives.lua`
+      `ReconcileProgress`), which also survives spending or dropping the items.
+  - `gotnewitem` → `{ item, slot }` fires for stack merges too (`inventory.lua:1100`),
+    but it *also* fires when a player moves an item into a carried container such as
+    their own backpack (`components/container.lua` ~491/508). It is a pickup-sound
+    event, not a reliable "acquired something new" signal; do not use it to grant
+    collect progress. Reconcile collect objectives against
+    `inventory:ForEachItem` instead (see `objectives.lua` `ReconcileProgress`).
   - `builditem` → `{ item = <entity>, recipe = <recipe>, skin, prototyper }`, pushed by
-    `components/builder.lua` (~line 741).
+    `components/builder.lua` (~line 741) **only when the product has an
+    `inventoryitem` component** (torch, tool, most craftables).
+  - `buildstructure` → `{ item = <structure>, recipe = <recipe>, skin }`, pushed by
+    `components/builder.lua` (~line 821) for products with **no** `inventoryitem`
+    component — firepit, researchlab, walls, statues, anything placed into the world.
+    Both are pushed on the builder/building player. The manager listens for both;
+    the `craft` objective type matches only `builditem` and `build` matches only
+    `buildstructure`, so an objective declared with the wrong type never completes.
   - `killed` → `{ victim = <entity>, attacker = <entity>, ... }`, pushed on the
     **attacker/doer**, not the victim (`components/combat.lua:682`, also `actions.lua`).
     Listening on the player is therefore correct for kill objectives.
 - `playeractivated` is pushed to `TheWorld` in `prefabs/player_common.lua` (~line 826),
   after `ActivateHUD` has already run `hud:SetMainCharacter(inst)`.
+
+## Console and chat commands
+
+- **Slash commands do not work in the current UI.** The redux chat sidebar
+  (`widgets/redux/chatsidebar.lua` ~77-84) trims the line and sends it with
+  `TheNet:Say`; it never calls `UserCommands.RunTextUserCommand`. Only the legacy
+  `screens/chatinputscreen.lua:169` parses a leading `/`. `AddUserCommand` is
+  therefore unreachable from normal chat; do not use it for anything a player or
+  developer needs to run.
+- The debug console (`~`) autocompletes **global functions whose names start with
+  `c_`**: `screens/consolescreen.lua` iterates `pairs(_G)` once and builds its
+  prediction dictionary from `type(v) == "function"` and `k:find("c_") == 1`.
+  A mod can therefore expose console commands by assigning
+  `GLOBAL.c_mycommand = function(...) ... end` in `modmain.lua`. The dictionary is
+  built the first time the console screen is created, so define commands at load.
+- An in-game admin's console starts in **remote execute** mode (Ctrl toggles;
+  `ConsoleScreen:ToggleRemoteExecute`). Remote input is sent with
+  `TheNet:SendRemoteExecute` and evaluated on the server by
+  `ExecuteConsoleCommand` (`mainfunctions.lua:2166`), which temporarily sets
+  `ThePlayer` to the caller's server-side entity. A `c_` function can therefore
+  reach server components directly when `TheNet:GetIsServer()` is true.
+- Local evaluate runs in the client VM, where `ThePlayer` only has replicas.
+  Forward to the server with `AddModRPCHandler` + `SendModRPCToServer`
+  (`networkclientrpc.lua`); the handler receives `(player_entity, data)` and must
+  re-check admin with `TheNet:GetClientTableForUser(player.userid).admin`, because
+  any client can send an RPC.
 
 ## World state (server)
 

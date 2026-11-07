@@ -49,11 +49,16 @@ local GuidedMissionManager = Class(function(self, inst)
     self.started = false
     self.loaded = false
 
-    inst:ListenForEvent("itemget", function(_, data)
-        self:OnObjectiveEvent("itemget", data)
-    end)
+    -- No `itemget` listener: collect progress is read from the inventory by
+    -- the poller (see Objectives.ReconcileProgress for why events cannot be
+    -- trusted). Crafting/building and kills are event-driven.
+    -- Inventory-item recipes (torch) fire `builditem`; structures (firepit,
+    -- researchlab) fire `buildstructure` instead. See objectives.lua.
     inst:ListenForEvent("builditem", function(_, data)
         self:OnObjectiveEvent("builditem", data)
+    end)
+    inst:ListenForEvent("buildstructure", function(_, data)
+        self:OnObjectiveEvent("buildstructure", data)
     end)
     inst:ListenForEvent("killed", function(_, data)
         self:OnObjectiveEvent("killed", data)
@@ -96,6 +101,39 @@ function GuidedMissionManager:Begin()
     self:SetMission(1)
 end
 
+-- Switch to an arbitrary mission (1-based), discarding progress on the current
+-- one. `#Missions + 1` is the terminal "all missions complete" state. Returns
+-- false for an out-of-range index and changes nothing in that case. Used by the
+-- /resetmissions and /setmission admin commands. Tracker state only: no game
+-- state is touched, and the inventory is left alone (it counts as starting
+-- inventory for collect objectives, exactly as a fresh mission would).
+function GuidedMissionManager:JumpTo(index)
+    index = tonumber(index)
+    if index == nil or index < 1 or index > #Missions + 1 then
+        return false
+    end
+
+    if self.begin_task ~= nil then
+        self.begin_task:Cancel()
+        self.begin_task = nil
+        self.started = true
+    end
+
+    if self.hold_task ~= nil then
+        self.hold_task:Cancel()
+        self.hold_task = nil
+    end
+
+    self.loaded = false
+    self.mission_index = 0
+    self:SetMission(index)
+    return true
+end
+
+function GuidedMissionManager:Reset()
+    self:JumpTo(1)
+end
+
 function GuidedMissionManager:SetMission(index)
     self.mission_index = index
     local mission = Missions[index]
@@ -118,7 +156,9 @@ function GuidedMissionManager:SetMission(index)
     end
 
     self:Sync()
-    self:Announce(string.format(
+    -- Server log only: the HUD already shows the mission, and announcing every
+    -- start would spam chat (especially with /setmission).
+    self:Log(string.format(
         "%s - Mission %d: %s",
         self.inst:GetDisplayName(),
         index,
@@ -155,6 +195,12 @@ end
 function GuidedMissionManager:OnPoll()
     if self.completed or self.current_mission == nil then
         return
+    end
+
+    -- Collect objectives are inventory-derived: reread them every poll. This
+    -- is the only place collect progress changes (see Objectives.ReconcileProgress).
+    for i, objective in ipairs(self.current_mission.objectives or {}) do
+        self.progress[i] = Objectives.ReconcileProgress(self.inst, objective, self.progress[i])
     end
 
     self:CheckCompletion()
@@ -241,8 +287,14 @@ function GuidedMissionManager:Sync()
     })
 end
 
-function GuidedMissionManager:Announce(message)
+-- Server-log line only.
+function GuidedMissionManager:Log(message)
     print("[Guided Missions] " .. tostring(message))
+end
+
+-- Server log plus chat, for completions. Mission starts use Log instead.
+function GuidedMissionManager:Announce(message)
+    self:Log(message)
     if Settings.announce_missions and GLOBAL.TheNet ~= nil then
         GLOBAL.TheNet:Announce(message)
     end

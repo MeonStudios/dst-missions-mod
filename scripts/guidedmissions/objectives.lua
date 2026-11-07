@@ -6,6 +6,7 @@ local Objectives = {}
 -- Labels never carry a count: the tracker renders the counter separately.
 local DEFAULT_LABELS = {
     collect = "Collect %s",
+    craft = "Craft %s",
     build = "Build %s",
     kill = "Kill %s",
     survive = "Survive until day %d",
@@ -64,7 +65,8 @@ end
 -- The prefab whose inventory icon illustrates this objective, or nil when the
 -- objective has no item icon (survive rows render text-only).
 function Objectives.GetIconPrefab(objective)
-    if objective.type == "collect" or objective.type == "build" or objective.type == "kill" then
+    if objective.type == "collect" or objective.type == "craft"
+        or objective.type == "build" or objective.type == "kill" then
         return objective.prefab
     end
     return nil
@@ -101,6 +103,30 @@ function Objectives.InitialProgress(inst, objective)
     return 0
 end
 
+-- Collect progress is derived from the inventory, never accumulated from
+-- events. Two verified engine behaviours make event counting unsafe:
+--   * `itemget` fires only when an item lands in an *empty* slot, so pickups
+--     that merge into an existing stack are invisible (stackable:Put emits
+--     nothing), and
+--   * `itemget` fires again from `Inventory:GiveActiveItem` every time an item
+--     is clicked onto the cursor, so adding its stack size each time lets a
+--     player inflate the counter just by clicking their own inventory.
+-- Take the peak inventory count instead: it rises when items are acquired,
+-- never falls when they are spent or dropped, and internal inventory moves do
+-- not change it.
+function Objectives.ReconcileProgress(inst, objective, progress)
+    if objective.type ~= "collect" then
+        return tonumber(progress) or 0
+    end
+    return math.max(tonumber(progress) or 0, Objectives.CountInInventory(inst, objective.prefab))
+end
+
+local function MatchesRecipe(objective, data)
+    local recipe_name = data.recipe ~= nil and data.recipe.name or nil
+    local item_prefab = data.item ~= nil and data.item.prefab or nil
+    return recipe_name == objective.prefab or item_prefab == objective.prefab
+end
+
 -- Returns how much progress the event adds to this objective. 0 means the
 -- event is irrelevant to it.
 function Objectives.GetEventIncrement(objective, event, data)
@@ -108,19 +134,13 @@ function Objectives.GetEventIncrement(objective, event, data)
         return 0
     end
 
-    if event == "itemget" then
-        local item = data.item
-        if objective.type == "collect" and item ~= nil and item.prefab == objective.prefab then
-            local stackable = item.components.stackable
-            return stackable ~= nil and stackable:StackSize() or 1
-        end
-    elseif event == "builditem" then
-        if objective.type == "build" then
-            local recipe_name = data.recipe ~= nil and data.recipe.name or nil
-            local item_prefab = data.item ~= nil and data.item.prefab or nil
-            if recipe_name == objective.prefab or item_prefab == objective.prefab then
-                return 1
-            end
+    if (event == "builditem" and objective.type == "craft")
+        or (event == "buildstructure" and objective.type == "build") then
+        -- `builditem` is an inventory item; `buildstructure` is something
+        -- placed in the world. The two objective types are deliberately kept
+        -- apart so a mission says which one it means. See docs/dst-api.md.
+        if MatchesRecipe(objective, data) then
+            return 1
         end
     elseif event == "killed" then
         local victim = data.victim

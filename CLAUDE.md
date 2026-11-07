@@ -16,6 +16,7 @@ Lua 5.1/LuaJIT semantics. No build step: this directory *is* the mod folder.
 | `scripts/guidedmissions/settings.lua` | Runtime settings, populated from mod options in `modmain.lua`. |
 | `scripts/widgets/guidedmissiontracker.lua` | Client HUD. Renders the netvar string contract as a mission card (crafting-menu frame, item icons, green checks); no game logic. |
 | `tests/manager_test.lua` | Plain-Lua logic harness for the server manager. Stubs DST globals and replays the full chain; never loaded by the game. |
+| `tests/modmain_test.lua` | Loads the real `modmain.lua` in a sandbox matching DST's mod env (notably **no `tonumber`**) and drives the console commands / RPC handlers. Never loaded by the game. |
 | `tests/preview/` | Offline HUD preview: runs the real tracker with stubbed widgets and renders PNGs from the game's atlases/fonts. |
 
 ## Invariants — breaking these breaks the mod
@@ -82,6 +83,20 @@ elevated prompt. It only helps this machine; other players need their own copy.
   It is a logic check only — rendering, netvar replication, and engine API behavior are
   still verified only by a human running the game.
 
+- **Run the modmain harness** when touching `modmain.lua` (especially the console
+  commands or anything that later runs in the mod environment):
+
+  ```bash
+  "/c/Program Files (x86)/Lua/5.1/lua.exe" tests/modmain_test.lua
+  ```
+
+  It loads the real `modmain.lua` with the same restricted environment DST builds in
+  `mods.lua` (`CreateEnvironment`) — a whitelist with no `_G` fallback and no
+  `tonumber`. It exercises `c_resetmissions`/`c_setmission` on the server and client
+  paths plus the RPC handlers. This catches `attempt to call global 'tonumber' (a nil
+  value)` style bugs that the manager harness cannot, because `require()`d modules run
+  in the normal global env.
+
 - **Preview the HUD without launching the game.** `tests/preview` runs the *real*
   `widgets/guidedmissiontracker.lua` with stubbed widget classes, dumps its draw tree,
   and renders PNGs using the game's actual KTEX atlases and BMFont glyphs:
@@ -101,8 +116,11 @@ elevated prompt. It only helps this machine; other players need their own copy.
   runtime errors, wrong engine-API assumptions, or `strict.lua` undeclared-global errors.
   Those still require the in-game run below. See **Troubleshooting**.
 - Host console: `c_save()` to test `OnSave`/`OnLoad`, `c_reset()` for a fresh world.
-- Mission state is stored on players, so an existing save retains old progress —
-  regenerate the world for a clean test. Test with two or more players where possible.
+- Mission state is stored on players, so an existing save retains old progress.
+  As an admin/host, open the console (`~`) and run `c_resetmissions()` to restart
+  your chain from mission 1, or `c_setmission(n)` (1-based) to jump to any
+  mission, without regenerating the world (`modmain.lua` →
+  `GuidedMissionManager:JumpTo`). Test with two or more players where possible.
 
 ## Troubleshooting (read this before debugging)
 

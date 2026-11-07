@@ -25,8 +25,8 @@ configuration_options = {
     },
     {
         name = "ANNOUNCE_MISSIONS",
-        label = "Announce Progress",
-        hover = "Announce mission starts and completions to all players.",
+        label = "Announce Completions",
+        hover = "Announce mission completions to all players.",
         options = {
             { description = "Enabled", data = true },
             { description = "Disabled", data = false },
