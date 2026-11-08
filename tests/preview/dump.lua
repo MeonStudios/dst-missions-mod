@@ -291,6 +291,35 @@ package.loaded["widgets/image"] = Image
 package.loaded["widgets/text"] = Text
 package.loaded["widgets/imagebutton"] = ImageButton
 
+-- The tracker draws the flower row with a UIAnim (the world flower's anim
+-- art, which has no readable static texture). render.py cannot decode engine
+-- animations, so a UIAnim row is laid out but not painted in the preview; see
+-- docs/dst-api.md, "Item icons and UI atlases".
+local UIAnim = Class(Widget, function(self)
+    Widget._ctor(self, "UIAnim")
+    self.anim_state = {
+        SetBank = function(state, value) state.bank = value end,
+        SetBuild = function(state, value) state.build = value end,
+        PlayAnimation = function(state, value) state.animation = value end,
+        -- Top-left anchored box, as the engine reports it.
+        GetVisualBB = function() return 0, 0, 24, 24 end,
+    }
+end)
+
+function UIAnim:GetAnimState()
+    return self.anim_state
+end
+
+function UIAnim:GetBoundingBoxSize()
+    return 24, 24
+end
+
+function UIAnim:GetVisualBB()
+    return 0, 0, 24, 24
+end
+
+package.loaded["widgets/uianim"] = UIAnim
+
 -- The tracker reads these from the owner's netvars; swap in a table we can
 -- replace per scenario.
 local current_state = {}
@@ -406,6 +435,18 @@ local CASES = {
             title = "See the Dawn",
             subtext = "Just don't stare at the fire all night.",
             rows = ROW("Survive until day 3", "", "Day 1/3"),
+            state = "active",
+        },
+    },
+    {
+        "sanity_2row",
+        {
+            title = "Keeping Your Sanity",
+            subtext = "The world is strange enough already.",
+            rows = table.concat({
+                ROW("Pick flowers", "flower", "0/3"),
+                ROW("Restore sanity", "brain", "0/15"),
+            }, ";"),
             state = "active",
         },
     },

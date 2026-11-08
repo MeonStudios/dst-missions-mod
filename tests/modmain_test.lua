@@ -62,6 +62,7 @@ TheNet = {
 local rpc_handlers = {}
 local sent_rpcs = {}
 local console_output = {}
+local component_postinits = {}
 
 local function RecordPrint(...)
     local parts = {}
@@ -78,6 +79,12 @@ local function ModAPI(env)
     end
     env.AddPlayerPostInit = function() end
     env.AddPrefabPostInit = function() end
+    env.AddComponentPostInit = function(component, fn)
+        component_postinits[component] = fn
+    end
+    env.Asset = function(kind, path)
+        return { kind = kind, path = path }
+    end
     env.GetModRPC = function(namespace, name)
         return { namespace = namespace, id = name }
     end
@@ -143,6 +150,140 @@ Check("modmain loads in the sandbox", ok, err)
 
 Check("c_setmission is a console global", type(_G.c_setmission) == "function")
 Check("c_resetmissions is a console global", type(_G.c_resetmissions) == "function")
+
+Check("flower anim asset declared",
+    type(env.Assets) == "table" and env.Assets[1] ~= nil
+    and env.Assets[1].path == "anim/flowers.zip")
+
+-- ---- cooker post-init -----------------------------------------------------
+-- Fire cooking has no vanilla player event; modmain wraps Cooker:CookItem to
+-- report successful cooks. Drive the registered post-init directly.
+
+local cooker_postinit = component_postinits.cooker
+Check("cooker post-init registered", type(cooker_postinit) == "function")
+
+local function NewCooker(product)
+    local cooker = {}
+    function cooker:CookItem()
+        return product
+    end
+    return cooker
+end
+
+local function NewChef()
+    local events = {}
+    return {
+        events = events,
+        PushEvent = function(_, name, data)
+            events[#events + 1] = { name = name, data = data }
+        end,
+    }
+end
+
+if type(cooker_postinit) == "function" then
+    local product = { prefab = "cookedmeat", components = { edible = {} } }
+    local cooker = NewCooker(product)
+    cooker_postinit(cooker)
+    local chef = NewChef()
+    local returned = cooker:CookItem({ prefab = "meat" }, chef)
+    Check("cooker wrapper returns the product unchanged", returned == product)
+    Check("cooker wrapper reports cooked food",
+        #chef.events == 1 and chef.events[1].name == "guidedmissions_cookedfood")
+    Check("guidedmissions_cookedfood event carries the product",
+        chef.events[1] ~= nil and chef.events[1].data.product == product)
+
+    -- A failed cook (CanCook false) returns nil and must report nothing.
+    local failed = NewCooker(nil)
+    cooker_postinit(failed)
+    local failed_chef = NewChef()
+    Check("failed cook returns nil", failed:CookItem({}, failed_chef) == nil)
+    Check("failed cook reports nothing", #failed_chef.events == 0)
+
+    -- Cooking something that does not produce an edible item is not food.
+    local nonfood = NewCooker({ prefab = "ash", components = {} })
+    cooker_postinit(nonfood)
+    local nonfood_chef = NewChef()
+    nonfood:CookItem({}, nonfood_chef)
+    Check("non-food cook reports nothing", #nonfood_chef.events == 0)
+
+    -- No chef (non-player cooker use) must not error.
+    local chefless = NewCooker(product)
+    cooker_postinit(chefless)
+    Check("nil chef is safe", chefless:CookItem({}) == product)
+end
+
+-- ---- stewer post-init -----------------------------------------------------
+
+local stewer_postinit = component_postinits.stewer
+Check("stewer post-init registered", type(stewer_postinit) == "function")
+
+local function NewStewer()
+    local stewer = { product = nil, targettime = nil, done = nil }
+    function stewer:IsCooking()
+        return not self.done and self.targettime ~= nil
+    end
+    function stewer:StartCooking()
+        self.product = "meatballs"
+        self.ingredient_prefabs = { "meat", "berries", "berries", "berries" }
+        self.targettime = 10
+        self.done = nil
+    end
+    return stewer
+end
+
+if type(stewer_postinit) == "function" then
+    local stewer = NewStewer()
+    stewer_postinit(stewer)
+    local chef = NewChef()
+    stewer:StartCooking(chef)
+    Check("stewer wrapper reports the dish",
+        #chef.events == 1 and chef.events[1].name == "guidedmissions_stewedfood")
+    Check("stewed event carries the product",
+        chef.events[1] ~= nil and chef.events[1].data.product == "meatballs")
+
+    -- Already cooking: a second start must not report another dish.
+    stewer:StartCooking(chef)
+    Check("already-cooking start reports nothing", #chef.events == 1)
+
+    -- A pot that does not start (no product, not cooking) must report nothing.
+    local empty = { product = nil, targettime = nil, done = nil }
+    function empty:IsCooking() return not self.done and self.targettime ~= nil end
+    function empty:StartCooking() end
+    stewer_postinit(empty)
+    local empty_chef = NewChef()
+    empty:StartCooking(empty_chef)
+    Check("failed stewer start reports nothing", #empty_chef.events == 0)
+
+    -- No chef (non-player trigger) must not error.
+    local chefless = NewStewer()
+    stewer_postinit(chefless)
+    local ok = pcall(function() chefless:StartCooking(nil) end)
+    Check("stewer start with nil chef is safe", ok)
+end
+
+-- ---- sanity post-init -----------------------------------------------------
+
+local sanity_postinit = component_postinits.sanity
+Check("sanity post-init registered", type(sanity_postinit) == "function")
+
+if type(sanity_postinit) == "function" then
+    local sanity = { current = 100, max = 100, pushed = {} }
+    -- Stand-in for Sanity:DoDelta: clamp like vanilla and remember what the
+    -- wrapper had recorded at the moment the event-equivalent runs.
+    function sanity:DoDelta(delta)
+        self.pushed[#self.pushed + 1] = self._guidedmissions_last_delta
+        self.current = math.min(math.max(self.current + delta, 0), self.max)
+    end
+
+    sanity_postinit(sanity)
+    sanity:DoDelta(5)
+    Check("sanity wrapper records the requested delta", sanity.pushed[1] == 5)
+    Check("sanity wrapper does not change the clamped value", sanity.current == 100)
+
+    sanity:DoDelta(-30)
+    Check("sanity wrapper records losses too", sanity.pushed[2] == -30)
+    Check("sanity wrapper leaves DoDelta behaviour intact", sanity.current == 70)
+end
 
 -- ---- fake players ---------------------------------------------------------
 

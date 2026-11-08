@@ -8,6 +8,13 @@ local tonumber = GLOBAL.tonumber
 local MissionNetvars = require("guidedmissions/netvars")
 local Settings = require("guidedmissions/settings")
 
+-- The tracker draws the world flower's animation for pick rows (flowers are
+-- world plants with no inventory icon), so the client needs the vanilla anim
+-- loaded. HUD widgets do not inherit a prefab's asset list.
+Assets = {
+    Asset("ANIM", "anim/flowers.zip"),
+}
+
 Settings.show_tracker = GetModConfigData("SHOW_TRACKER") ~= false
 Settings.announce_missions = GetModConfigData("ANNOUNCE_MISSIONS") ~= false
 
@@ -94,6 +101,56 @@ AddPlayerPostInit(function(inst)
     -- Gameplay state is server-authoritative.
     if GLOBAL.TheNet:GetIsServer() and inst.components.guidedmissionmanager == nil then
         inst:AddComponent("guidedmissionmanager")
+    end
+end)
+
+-- Vanilla fire cooking emits no player event, so observe the `cooker` component
+-- (campfire, firepit, lighter). This returns CookItem's result untouched and
+-- only reports a successful cook to the chef, whose manager listens for it. The
+-- crockpot uses the `stewer` component instead, so it is deliberately excluded.
+AddComponentPostInit("cooker", function(self)
+    local _CookItem = self.CookItem
+    self.CookItem = function(component, item, chef)
+        local product = _CookItem(component, item, chef)
+        if product ~= nil and chef ~= nil
+            and product.components ~= nil and product.components.edible ~= nil then
+            chef:PushEvent("guidedmissions_cookedfood", { ingredient = item, product = product })
+        end
+        return product
+    end
+end)
+
+-- Vanilla `sanitydelta` carries no amount (`components/sanity.lua:405`, unlike
+-- `healthdelta`'s `amount`), and DoDelta clamps at the bar's ends, so a sanity
+-- gain at full sanity is invisible in the event. Record the requested delta on
+-- the component just before vanilla runs; the manager's sanity objective reads
+-- it as `_guidedmissions_last_delta` and credits the full requested amount,
+-- including the part that overflowed. The component's behaviour is unchanged.
+AddComponentPostInit("sanity", function(self)
+    local _DoDelta = self.DoDelta
+    self.DoDelta = function(component, delta, overtime)
+        component._guidedmissions_last_delta = delta
+        return _DoDelta(component, delta, overtime)
+    end
+end)
+
+-- Crockpots use `stewer`, not `cooker`, and also emit no player event.
+-- StartCooking(doer) calculates the finished dish, so report it to the chef
+-- once the pot actually starts (not when it is already cooking).
+AddComponentPostInit("stewer", function(self)
+    local _StartCooking = self.StartCooking
+    self.StartCooking = function(component, doer)
+        local was_cooking = component:IsCooking()
+        local result = _StartCooking(component, doer)
+        if not was_cooking and component:IsCooking()
+            and component.product ~= nil
+            and doer ~= nil and doer.PushEvent ~= nil then
+            doer:PushEvent("guidedmissions_stewedfood", {
+                product = component.product,
+                ingredients = component.ingredient_prefabs,
+            })
+        end
+        return result
     end
 end)
 

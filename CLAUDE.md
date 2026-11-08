@@ -61,6 +61,21 @@ live in-game immediately:
 junction is missing (e.g. after a reinstall), recreate it with `mklink /J` from an
 elevated prompt. It only helps this machine; other players need their own copy.
 
+- **Run every offline check at once** before asking the user to test in-game — syntax,
+  manager harness, modmain harness. Stops at the first failure and exits non-zero:
+
+  ```powershell
+  .\verify
+  ```
+
+  `verify.cmd` at the repo root; it `cd`s to its own directory first, so any working
+  directory works. Batch runs in place from PowerShell and cmd (no `.sh` file
+  association, so no stray Git Bash window). Override the interpreters with
+  `LUA=...` / `LUAC=...`. `tests/preview/run.sh` is still POSIX and needs `sh`.
+
+  The individual checks below are the same commands, kept separate so you know which
+  one to reach for while iterating.
+
 - **Run the syntax check after every change**, before asking the user to test in-game.
   Lua 5.1 is installed (`C:\Program Files (x86)\Lua\5.1`) and `luac` is on `PATH`:
 
@@ -72,9 +87,10 @@ elevated prompt. It only helps this machine; other players need their own copy.
   Git Bash because the install's `lua/` module directory shadows `lua.exe` on `PATH`.
 
 - **Run the manager harness** when touching the manager, objective helpers, netvars, or
-  the mission chain. It runs the real modules with stubbed engine globals, replays every
-  mission (including the 3-second hold, the `done` payload, save/load, and task cleanup),
-  and exits non-zero on failure:
+  the mission chain. It validates the mission data first (known objective types, unique
+  ids, prefab-id shape) and stops there on a data error, then runs the real modules with
+  stubbed engine globals, replays every mission (including the 3-second hold, the `done`
+  payload, save/load, and task cleanup), and exits non-zero on failure:
 
   ```bash
   "/c/Program Files (x86)/Lua/5.1/lua.exe" tests/manager_test.lua
@@ -105,7 +121,7 @@ elevated prompt. It only helps this machine; other players need their own copy.
   sh tests/preview/run.sh
   ```
 
-  Outputs `tests/preview/out/{active_2row,active_1row,won,done,collapsed}.png`. Requires
+  Outputs `tests/preview/out/{active_2row,sanity_2row,active_1row,won,done,collapsed}.png`. Requires
   Pillow (`pip install pillow`). The game data path defaults to the Steam install and is
   overridable with `--game-data` or `DST_DATA`. Because it records the real widget, layout
   changes show up without duplicating constants. It does not exercise input, netvars, or

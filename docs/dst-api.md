@@ -119,8 +119,162 @@ documented and version-dependent.
   - `killed` → `{ victim = <entity>, attacker = <entity>, ... }`, pushed on the
     **attacker/doer**, not the victim (`components/combat.lua:682`, also `actions.lua`).
     Listening on the player is therefore correct for kill objectives.
+  - `working` → `{ target = <entity> }`, pushed on the **worker** by
+    `components/workable.lua` `WorkedBy_Internal` (~line 148) after the target's
+    `workleft` is decremented and before `onfinish` runs, so the target is still valid.
+    It fires for every workable action (chop, mine, dig, hammer). **`actions.lua:1352`
+    and `:1372` also push `working` with an empty table** when a wet tool slips out of
+    the hand — guard `data.target` before using it.
+  - `finishedwork` → `{ target = <entity>, action = <action> }`, pushed on the worker
+    only when `workleft` reaches 0 (`components/workable.lua` ~line 166). It runs
+    **after** the target's `onfinish`, which may have removed the target; prefer
+    `working` plus reading `target.components.workable.workleft` when the target might
+    disappear (trees survive as stumps, but other workables often do not).
+  - **Tree tags:** normal trees add the `tree` tag (`prefabs/evergreens.lua:848`,
+    `prefabs/deciduoustrees.lua:1301`, `prefabs/mushtree.lua:698`, etc.). A felled tree
+    keeps that tag when it becomes a stump, which adds `stump` and switches its
+    `workable.action` to `ACTIONS.DIG` (`prefabs/evergreens.lua:472-481`). Marble and
+    petrified trees have `tree` but their workable action is `ACTIONS.MINE`
+    (`prefabs/marbletree.lua:96-98`, `prefabs/tree_rocks.lua:449-451`). So "felled a
+    tree" is `target:HasTag("tree")`, no `stump` tag, `workable.action == ACTIONS.CHOP`,
+    and `workable.workleft <= 0` at `working` time.
+  - `oneat` → `{ food = <entity>, feeder = <entity> }`, pushed on the **eater**
+    (`components/eater.lua:270`) after stats are applied and before the food is removed;
+    `food.prefab` is the eaten item's id. `oneaten` → `{ eater = <entity> }` is the
+    mirror image, pushed on the **food** (`components/edible.lua:210`). Vanilla
+    `butterfly` has no `edible` component (`prefabs/butterfly.lua`), so it cannot be
+    eaten; `butterflywings` is edible (`prefabs/butterflywings.lua:36-39`) and
+    `moonbutterfly` is likewise not edible (`prefabs/moonbutterfly.lua`). An `eat`
+    objective for `butterfly` therefore never completes in vanilla.
+  - `healthdelta` → `{ oldpercent, newpercent, overtime, cause, afflicter, amount }`,
+    pushed on the entity whose health changed by `Health:DoDelta`
+    (`components/health.lua:642`). **`amount` is the requested delta, not the health
+    actually gained**: `DoDelta(20)` at 148/150 pushes `amount = 20` while `SetVal` caps
+    at 150. The requested amount is deliberate credit for mod objectives (overheal
+    counts); use `(newpercent - oldpercent) * health.maxhealth` instead if you need the
+    points that fit. `health.maxhealth` is a plain field set by `Health:SetMaxHealth`
+    (`components/health.lua:503-505`); there is no `GetMaxHealth` method
+    (`GetMaxWithPenalty` exists for the penalty-capped maximum). The event also fires for
+    overtime healing (sleeping bags, hot springs, elixirs), so deltas can be fractional.
+    **The event fires even when no health is gained**: `DoDelta` calls `SetVal`
+    unconditionally and pushes afterwards (`components/health.lua:613-642`), so a heal
+    applied at full health pushes `oldpercent == newpercent` with a positive `amount`
+    (all overheal). `amount == 0` (`Health:SetPercent`, `components/health.lua:550-553`)
+    or a negative `amount` counts nothing.
+  - `sanitydelta` → `{ oldpercent, newpercent, overtime, sanitymode }`, pushed on the
+    entity by `Sanity:DoDelta` (`components/sanity.lua:405`). **Unlike health there is no
+    `amount` in the event**, and `DoDelta` clamps `current` between 0 and
+    `max - max * penalty` (`components/sanity.lua:387`), so a gain that overflows the bar
+    cannot be recovered from the percentages. To credit requested (overheal) amounts,
+    observe the component itself: `modmain.lua` wraps `Sanity.DoDelta` via
+    `AddComponentPostInit("sanity")` and stores the requested delta on the component as
+    `_guidedmissions_last_delta` before vanilla pushes the event. Falling back to
+    percentages: use the difference scaled by `sanity.max` (the field behind
+    `Sanity:SetMax`, `components/sanity.lua:312`). Note `GetPercent()` is forced to 0/1 by
+    induced insanity/lunacy (`components/sanity.lua:288-293`), so percent deltas are
+    masked while those are active — the recorded raw delta is not.
+    Be aware `Sanity:LongUpdate` calls `DoDelta(self.rate * dt, true)` every tick
+    (`components/sanity.lua:609`), so positive auras/rates push continuous small
+    `sanitydelta` events, including at full sanity.
+  - `picksomething` → `{ object = <plant>, loot = <entity or list> }`, pushed on the
+    **picker** by `Pickable:SpawnProductLoot` (`components/pickable.lua:481,505`) when
+    the picker has an inventory and the pick produced loot. It does not fire on the
+    `droppicked` + lootdropper branch (flowers do not use it). The plant itself gets
+    `picked` → `{ picker, loot, plant }` (`components/pickable.lua:575`).
+  - **Picking a flower restores sanity as part of the pick**: `onpickedfn` calls
+    `picker.components.sanity:DoDelta(TUNING.SANITY_TINY)` (`prefabs/flower.lua:57`;
+    `SANITY_TINY = 5`, `tuning.lua:2033`). Evil flowers add or remove that amount
+    depending on the mode (`prefabs/flower_evil.lua:25-30`). **Petals do not restore
+    sanity**: they are edible with `healthvalue = TUNING.HEALING_TINY` (1), `hungervalue
+    = 0`, and no `sanityvalue` (`prefabs/petals.lua`), while evil petals give
+    `sanityvalue = -TUNING.SANITY_TINY` (`prefabs/petals_evil.lua:61`). A "restore
+    sanity by picking flowers" objective should therefore count picks, not petal eats.
+  - **Mining**: boulders/rocks, salt and moon rocks, marble trees and petrified trees
+    use `workable.action = ACTIONS.MINE` (`prefabs/rocks.lua`, `prefabs/marbletree.lua:
+    96-98`, `prefabs/tree_rocks.lua:449-451`). The `working`/workleft test above is the
+    same as for chopping.
 - `playeractivated` is pushed to `TheWorld` in `prefabs/player_common.lua` (~line 826),
   after `ActivateHUD` has already run `hud:SetMainCharacter(inst)`.
+
+## Cooking and food
+
+- **Fire cooking pushes no player event.** `ACTIONS.COOK.fn` (`actions.lua:2013-2038`)
+  removes the ingredient from the doer, calls
+  `act.target.components.cooker:CookItem(ingredient, act.doer)` and hands the returned
+  product back to the doer. `Cooker:CookItem` (`components/cooker.lua:25-49`) spawns the
+  product via `Cookable:Cook` and returns it, or returns `nil` when `CanCook` fails;
+  `Cookable:Cook` (`components/cookable.lua:19`) also pushes nothing. There is no
+  `cook`/`cooked` event to listen for.
+- **Which prefabs are "cookers":** campfire (`prefabs/campfire.lua:174`), firepit
+  (`prefabs/firepit.lua:211`) and the lighter (`prefabs/lighter.lua:359`) add the
+  `cooker` component. The crockpot adds `stewer` instead (`prefabs/cookpot.lua:309`), so
+  a `cooker` hook excludes crockpot meals by construction. To observe fire cooking,
+  wrap `CookItem` from `AddComponentPostInit("cooker", fn)` (`modutil.lua:566-573`;
+  `fn(component)` runs after construction) and return its result unchanged — this mod
+  pushes a `guidedmissions_cookedfood` event to the chef from that wrapper.
+- **Crockpot cooking also emits no player event.** `ACTIONS.COOK.fn`
+  (`actions.lua:2042-2053`) calls `stewer:StartCooking(act.doer)` for a target with a
+  `stewer` component. `Stewer:StartCooking` (`components/stewer.lua:130-180`) computes
+  `self.product` with `cooking.CalculateRecipe`, records `self.chef_id` (the starter's
+  userid) and `self.ingredient_prefabs`, sets `self.targettime`, and pushes nothing.
+  `Stewer:Harvest` (`components/stewer.lua:276`) spawns the finished dish and pushes
+  `learncookbookrecipe` on the harvester only when `chef_id == harvester.userid` and the
+  recipe has a cookbook category — not a general "dish cooked" signal. To observe it,
+  wrap `StartCooking` from `AddComponentPostInit("stewer", fn)`; check `IsCooking()`
+  before and after so a call that does not start a pot reports nothing. `product` here is
+  a prefab id **string**, not an entity. The pot can later rewrite it to `"wetgoop"` if
+  left in rain (`prefabs/cookpot.lua:225-233`), so crediting at start can over-credit a
+  dish that gets ruined; `Stewer:StopCooking("fire")` spawns the product at the pot.
+- **Food identification:** any item with a `components.edible` table is food, raw or
+  cooked. `edible.foodtype` / `edible.secondaryfoodtype` hold `FOODTYPE` strings
+  (`constants.lua:2026`). Berries are main type `VEGGIE` with secondary type `BERRY`
+  (`prefabs/veggies.lua:88-108`, assigned at `:599-600`; cooked variants at `:749-750`),
+  and **both `berries` and `berries_juicy` use that pair**, so
+  `secondaryfoodtype == "BERRY"` catches either variety. Carrots are plain `VEGGIE`, as
+  are mushrooms/corn/etc., so `foodtype == "VEGGIE"` is broad. The edible property
+  setters also add `edible_<foodtype>` tags (`components/edible.lua:9-15`), but reading
+  the fields avoids relying on when the tag was applied.
+- `Inventory:ForEachItem` (`components/inventory.lua:667-685`) visits item slots, equip
+  slots, the active/cursor item and the overflow container. It does **not** recurse into
+  a worn backpack's contents.
+
+## Recipe prototyping
+
+- **`unlockrecipe` → `{ recipe = <recipe name> }`**, pushed on the player by
+  `Builder:UnlockRecipe` (`components/builder.lua:463-473`). This is the signal Klei itself
+  uses for the `character.prototyped` metric (`components/playermetrics.lua:7-16`).
+- Sources: crafting a recipe at a crafting station for the first time
+  (`components/builder.lua:1005-1080`, `Builder:BufferBuild` ~`:1140-1180`), learning from
+  blueprints/teachers (`components/teacher.lua:21`, `prefabs/blueprint.lua:41`), recipe
+  scanners (`components/recipescanner.lua:39`), Webber's spider teacher
+  (`prefabs/spider.lua:347`) and character skill unlocks (`prefabs/wx78_common.lua:637`).
+- **A data-less `unlockrecipe` also exists**: `Builder:GiveAllRecipes`
+  (`components/builder.lua:136-139`) flips free-build mode and pushes it with no payload
+  (reached from `c_giveallrecipes`, `consolecommands.lua:361`). Guard
+  `data.recipe ~= nil` — `playermetrics.lua` does the same.
+- **The event is not deduplicated.** `Builder:UnlockRecipe` pushes even when the recipe is
+  already known, and `widgets/widgetutil.lua:127-143` calls it unconditionally for
+  placed-structure recipes every time the player starts placement. (Actual crafting paths
+  do check `KnowsRecipe` first, so items are not affected.) `Builder:UnlockRecipesForTech`
+  can bulk-push every recipe matching a tech level but is only reached from
+  `debugcommands.lua:576`. To count *new* recipes, keep a set of recipe ids seeded from
+  `builder.recipes` (`AddRecipe` appends there, `components/builder.lua:451-456`) after
+  load and credit each id once — this mod does that in the mission manager.
+- **`TECH.NONE` recipes never fire it.** `Builder:KnowsRecipe` (`components/builder.lua:
+  841-921`) returns true from the start for a recipe whose `level` entries are all zero,
+  because `recipe.level[v] > bonusvalue` is `0 > 0` and fails. Crafting an axe/pickaxe/
+  torch/campfire for the first time therefore takes the `elseif not recipe.nounlock then
+  self:AddRecipe(recipe.name)` branch (`builder.lua` ~`:1075-1078`, and the same pattern in
+  `_TryMakeIngredientRecipe` ~`:1035-1038`), which adds it to `builder.recipes` **without
+  pushing `unlockrecipe`**. Blueprint generation also excludes `TECH.NONE`
+  (`prefabs/blueprint.lua` `CanBlueprint*` require a non-zero tech level). So the event
+  means "newly unlocked/prototyped recipe" (station tech or taught recipe), not "first time
+  the player built this item" — use the `builditem`/`buildstructure` recipe payload for
+  first crafts.
+- `Builder:KnowsRecipe(recipe, ignore_tempbonus)` (`components/builder.lua:841`) accepts a
+  string or recipe table, but it also returns true for recipes currently accessible through
+  station/tech bonuses (`station_recipes`, tech trees), so it is not a reliable "was this
+  permanently learned before?" test. Use the `builder.recipes` list for that.
 
 ## Console and chat commands
 
@@ -315,11 +469,50 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
   ```
 - Verified 2026-10-31 (build 761239): all of `log` (#2), `flint` (#2), `firepit` (#2),
   `goldnugget` (#2), `twigs` (#3), `torch` (#3), `spider` (#3), `researchlab` (#3) resolve
-  with `<prefab>.tex` and no rename. `hound.tex` exists **only** in
-  `images/scrapbook_icons1.xml`, so it does **not** resolve through this helper (use
-  `GetScrapbookIconAtlas_Internal`, `simutil.lua:749-757`, or a different prefab).
-  `researchlab` has no `prefabs/researchlab.lua` — the id is created in
+  with `<prefab>.tex` and no rename. Also verified from the atlas XML: `rocks.tex`,
+  `petals.tex` and `healingsalve.tex` exist (icons for mine / pick / heal rows), while
+  `flower.tex` does not — flowers are world plants, not inventory items. `hound.tex`
+  exists **only** in `images/scrapbook_icons1.xml`, so it does **not** resolve through
+  this helper. `researchlab` has no `prefabs/researchlab.lua` — the id is created in
   `prefabs/scienceprototyper.lua:299` — and follows the same default.
+- **Scrapbook art** (verified 2026-11-08, not used by the tracker):
+  `GetScrapbookIconAtlas(imagename)` probes `images/scrapbook_icons1..3.xml` with
+  `TheSim:AtlasContains` (`simutil.lua:749-771`), and all three atlases are preloaded
+  unconditionally (`prefabs/global.lua:300-305`). It returns the atlas containing the
+  frame, else nil (no fallback-atlas trap). `flower.tex` (124x124) is there, along with
+  `flower_evil`, `berrybush`, `berrybush2`, `berrybush_juicy`, `grass` (icons1),
+  `sapling`/`reeds` (icons2) and `tumbleweed` (icons3). These are **framed photographs**:
+  the beige backing is baked into the texture, so a row using one reads as a photo tile
+  rather than a cut-out item icon. The mod deliberately does not fall back to them.
+- **World-entity art in a HUD widget: `UIAnim`** (`widgets/uianim.lua`) wraps an
+  `AnimState`. The world flower is `anim/flowers.zip`, bank/build `"flowers"`,
+  animations `f1`..`f10` plus `rose` (`prefabs/flower.lua:3,145-147`). A HUD widget must
+  declare the vanilla anim itself — `Assets = { Asset("ANIM", "anim/flowers.zip") }` in
+  modmain — because a widget does not inherit a prefab's asset list. Relative asset
+  paths are resolved by searching every asset path, game data included
+  (`mods.lua` registers mod assets with `force_path_search = true`, and
+  `resolvefilepath` walks `package.assetpath`, `scripts/util.lua:587-620`), so a vanilla
+  anim path works from a mod's `Assets`. Then
+  `GetAnimState():SetBank/SetBuild/PlayAnimation`.
+  **A UIAnim's visual box is anchored at its top-left at the widget position and
+  extends right and down** — the art is *not* centred on the widget origin. Verified
+  from `screens/redux/scrapbookscreen.lua:1687-1704`, which centres entity portraits in
+  a photo: it reads `x1,y1,x2,y2 = animstate:GetVisualBB()` (raw, unscaled) plus
+  `animal:GetBoundingBoxSize()` and positions with
+  `posx = W/2 - x2*SCALE`, `posy = y2*SCALE - H/2`. To centre anim art on a slot at
+  (x, y): read the raw box before scaling, pick `S = slot / max(width, height)`, then
+  `SetPosition(x - ((x1+x2)/2)*S, y + ((y1+y2)/2)*S)`. Getting the vertical sign wrong
+  puts the art a full visual height off; that happened here first because the world
+  flower's art is authored around the entity's feet and it was assumed the widget
+  anchored the art's base.
+  The offline preview cannot draw anims (`render.py` decodes KTEX atlases and BMFonts
+  only), so anim icons are laid out but blank in `tests/preview/out`.
+- **Sanity brain art**: `images/global_redux.xml` (`prefabs/global.lua:456`) contains
+  `status_sanity.tex` and `status_sanity_bad.tex` (128x128 brain glyphs with a soft dark
+  halo, transparent outside it) — the sanity badge art. `images/scrapbook_icons1.xml` also has
+  `icon_sanity.tex` (124x124 brain in an orange badge). The tracker maps the icon id
+  `brain` to `status_sanity.tex` via a small override table; neither id is an inventory
+  item.
 - Icons for non-item rows (e.g. a "survive until day N" row) have no item texture. Vanilla
   candidates, all in atlases declared unconditionally in `prefabs/global.lua`:
   `images/customisation.xml` → `day.tex` (127x127, a "DAY" wax-seal card; atlas declared at

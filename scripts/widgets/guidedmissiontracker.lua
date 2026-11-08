@@ -19,11 +19,30 @@ local Widget = require("widgets/widget")
 local Text = require("widgets/text")
 local Image = require("widgets/image")
 local ImageButton = require("widgets/imagebutton")
+local UIAnim = require("widgets/uianim")
 
 local Netvars = require("guidedmissions/netvars")
 
 local CRAFTING_ATLAS = "images/crafting_menu.xml"
 local UI_ATLAS = "images/ui.xml"
+
+-- Icon ids that use a static UI texture instead of an inventory image.
+-- `brain` is the id the sanity objective uses; the texture is the brain glyph
+-- from the HUD sanity badge. `images/global_redux.xml` is preloaded by the
+-- global prefab (`scripts/prefabs/global.lua:456`), so no Assets entry is
+-- needed.
+local ICON_IMAGES = {
+    brain = { "images/global_redux.xml", "status_sanity.tex" },
+}
+
+-- Icon ids drawn from a vanilla world animation. `flower` is a world plant
+-- with no inventory icon, and the scrapbook art is a framed picture; drawing
+-- the anim shows the same flower art the world uses (bank/build "flowers",
+-- animations f1..f10, `prefabs/flower.lua:145-147`). modmain declares the anim
+-- asset so the client has it loaded.
+local ICON_ANIMS = {
+    flower = { bank = "flowers", build = "flowers", animation = "f1" },
+}
 
 local CARD_W = 320
 local ROW_H = 42
@@ -423,6 +442,71 @@ function MissionTracker:ParseRows(payload)
     return rows
 end
 
+-- Add the icon for a row's id at (x, y). Returns true when one was drawn.
+-- Static UI art and world anims win over inventory lookups; the flower anim is
+-- scaled to the slot and centred on its visual bounds, because it is authored
+-- around the entity's feet rather than its centre.
+function MissionTracker:AddRowIcon(prefab, x, y)
+    if prefab == nil or prefab == "" then
+        return false
+    end
+
+    local static = ICON_IMAGES[prefab]
+    if static ~= nil then
+        local icon = self.row_root:AddChild(Image(static[1], static[2]))
+        icon:SetSize(ICON_SIZE, ICON_SIZE)
+        icon:SetPosition(x, y)
+        icon:SetClickable(false)
+        self.row_widgets[#self.row_widgets + 1] = icon
+        return true
+    end
+
+    local anim_def = ICON_ANIMS[prefab]
+    if anim_def ~= nil then
+        local anim = self.row_root:AddChild(UIAnim())
+        local state = anim:GetAnimState()
+        state:SetBank(anim_def.bank)
+        state:SetBuild(anim_def.build)
+        state:PlayAnimation(anim_def.animation)
+
+        -- A UIAnim's art is anchored at the top-left of its visual box and
+        -- extends right and down from the widget position (the scrapbook
+        -- screen centres entity art the same way:
+        -- screens/redux/scrapbookscreen.lua:1687-1704). Read the raw box before
+        -- scaling, then offset by half the scaled box so the art's centre
+        -- lands on the row: x shifts left, y shifts up.
+        local x1, y1, x2, y2 = state:GetVisualBB()
+        x1, y1, x2, y2 = x1 or 0, y1 or 0, x2 or 0, y2 or 0
+        local largest = math.max(x2 - x1, y2 - y1)
+        local scale = largest > 0 and ICON_SIZE / largest or 1
+        anim:SetScale(scale)
+
+        local cx = (x1 + x2) / 2
+        local cy = (y1 + y2) / 2
+        anim:SetPosition(x - cx * scale, y + cy * scale)
+        anim:SetClickable(false)
+        self.row_widgets[#self.row_widgets + 1] = anim
+        return true
+    end
+
+    local tex = prefab .. ".tex"
+    if GetInventoryItemAtlas ~= nil then
+        -- The `true` is mandatory: without it the helper falls back to
+        -- inventoryimages4 even when the icon does not exist.
+        local atlas = GetInventoryItemAtlas(tex, true)
+        if atlas ~= nil then
+            local icon = self.row_root:AddChild(Image(atlas, tex))
+            icon:SetSize(ICON_SIZE, ICON_SIZE)
+            icon:SetPosition(x, y)
+            icon:SetClickable(false)
+            self.row_widgets[#self.row_widgets + 1] = icon
+            return true
+        end
+    end
+
+    return false
+end
+
 function MissionTracker:BuildRows(rows)
     for _, widget in ipairs(self.row_widgets) do
         widget:Kill()
@@ -431,11 +515,14 @@ function MissionTracker:BuildRows(rows)
 
     local top = self.card_h / 2
 
+    -- Pass 1: the counter, or the check that replaces it. The icon column is
+    -- sized from the widest counter so the icons line up down the card instead
+    -- of hugging each row's own counter ("0/3" is narrower than "0/15").
+    local plans = {}
+    local counter_column_w = CHECK_SIZE
     for i, row in ipairs(rows) do
         local y = top - TOP_SAFE - TITLE_H - TITLE_GAP - ROW_H * (i - 0.5)
 
-        -- Counter, or the check that replaces it. Measuring the counter text
-        -- lets the icon sit right against it instead of a fixed column.
         local counter_w = CHECK_SIZE
         if row.done then
             -- Vanilla DST checkmark. It is dark green in the atlas, so it is
@@ -454,27 +541,19 @@ function MissionTracker:BuildRows(rows)
             self.row_widgets[#self.row_widgets + 1] = counter
         end
 
-        -- Item icon immediately left of the counter.
-        local has_icon = false
-        local icon_x = nil
-        if row.prefab ~= "" and GetInventoryItemAtlas ~= nil then
-            local tex = row.prefab .. ".tex"
-            -- The `true` is mandatory: without it the helper falls back to
-            -- inventoryimages4 even when the icon does not exist.
-            local atlas = GetInventoryItemAtlas(tex, true)
-            if atlas ~= nil then
-                icon_x = COLUMNS.right - counter_w - ICON_GAP - ICON_SIZE / 2
-                local icon = self.row_root:AddChild(Image(atlas, tex))
-                icon:SetSize(ICON_SIZE, ICON_SIZE)
-                icon:SetPosition(icon_x, y)
-                icon:SetClickable(false)
-                self.row_widgets[#self.row_widgets + 1] = icon
-                has_icon = true
-            end
-        end
+        counter_column_w = math.max(counter_column_w, counter_w)
+        plans[#plans + 1] = { row = row, y = y, counter_w = counter_w }
+    end
 
-        -- Labels always start at the content edge; an icon only takes space
-        -- away from the right of the label, just before the counter.
+    local icon_x = COLUMNS.right - counter_column_w - ICON_GAP - ICON_SIZE / 2
+
+    -- Pass 2: icons and labels. Labels always start at the content edge; an
+    -- icon only takes space from the right of the label, just before the
+    -- counter column.
+    for _, plan in ipairs(plans) do
+        local row, y, counter_w = plan.row, plan.y, plan.counter_w
+        local has_icon = self:AddRowIcon(row.prefab, icon_x, y)
+
         local label_left = COLUMNS.left
         local label_right = has_icon and (icon_x - ICON_SIZE / 2 - 8)
             or (COLUMNS.right - counter_w - 10)

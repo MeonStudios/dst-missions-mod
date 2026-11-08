@@ -48,6 +48,11 @@ local GuidedMissionManager = Class(function(self, inst)
     self.completed = false
     self.started = false
     self.loaded = false
+    -- Recipe ids the player already knew (or has been credited for). Vanilla
+    -- pushes `unlockrecipe` again for every structure placement (widgetutil
+    -- calls UnlockRecipe unconditionally), so prototype objectives count only
+    -- the first sighting. Seeded from builder.recipes after load (Begin).
+    self.known_recipes = {}
 
     -- No `itemget` listener: collect progress is read from the inventory by
     -- the poller (see Objectives.ReconcileProgress for why events cannot be
@@ -63,6 +68,39 @@ local GuidedMissionManager = Class(function(self, inst)
     inst:ListenForEvent("killed", function(_, data)
         self:OnObjectiveEvent("killed", data)
     end)
+    -- `working` fires on the worker for every workable swing (chop, mine, dig,
+    -- hammer); the chop/mine objectives inspect `data.target` to tell a felled
+    -- tree or a finished boulder from the rest. `oneat` fires on the eater with
+    -- the food entity, `picksomething` on the picker with the plant,
+    -- `healthdelta`/`sanitydelta` on any stat change. All are pushed server-side.
+    -- `guidedmissions_cookedfood` and `guidedmissions_stewedfood` are pushed by
+    -- modmain's `cooker`/`stewer` component post-inits, because vanilla fire and
+    -- crockpot cooking emit no player event. `unlockrecipe` is vanilla:
+    -- Builder:UnlockRecipe pushes it when a recipe is prototyped or learned.
+    inst:ListenForEvent("working", function(_, data)
+        self:OnObjectiveEvent("working", data)
+    end)
+    inst:ListenForEvent("oneat", function(_, data)
+        self:OnObjectiveEvent("oneat", data)
+    end)
+    inst:ListenForEvent("picksomething", function(_, data)
+        self:OnObjectiveEvent("picksomething", data)
+    end)
+    inst:ListenForEvent("healthdelta", function(_, data)
+        self:OnObjectiveEvent("healthdelta", data)
+    end)
+    inst:ListenForEvent("sanitydelta", function(_, data)
+        self:OnObjectiveEvent("sanitydelta", data)
+    end)
+    inst:ListenForEvent("guidedmissions_cookedfood", function(_, data)
+        self:OnObjectiveEvent("guidedmissions_cookedfood", data)
+    end)
+    inst:ListenForEvent("guidedmissions_stewedfood", function(_, data)
+        self:OnObjectiveEvent("guidedmissions_stewedfood", data)
+    end)
+    inst:ListenForEvent("unlockrecipe", function(_, data)
+        self:OnUnlockRecipe(data)
+    end)
 
     -- Survival objectives depend on world day, and this also refreshes the
     -- "day X" display in the tracker.
@@ -77,11 +115,37 @@ local GuidedMissionManager = Class(function(self, inst)
     end)
 end)
 
+-- Seed from the builder's learned list. This runs after OnLoad (Begin is
+-- delayed a second), so loaded saves and character starting recipes are marked
+-- as already known rather than counted when they are re-triggered.
+function GuidedMissionManager:SnapshotKnownRecipes()
+    local builder = self.inst.components ~= nil and self.inst.components.builder or nil
+    local recipes = builder ~= nil and builder.recipes or nil
+    if recipes ~= nil then
+        for i = 1, #recipes do
+            self.known_recipes[recipes[i]] = true
+        end
+    end
+end
+
+-- Vanilla re-pushes `unlockrecipe` for known recipes in some paths (notably
+-- structure placement via widgets/widgetutil.lua), so credit only the first
+-- sighting of each recipe. See docs/dst-api.md, "Recipe prototyping".
+function GuidedMissionManager:OnUnlockRecipe(data)
+    local recipe = data ~= nil and data.recipe or nil
+    if recipe == nil or self.known_recipes[recipe] then
+        return
+    end
+    self.known_recipes[recipe] = true
+    self:OnObjectiveEvent("unlockrecipe", { recipe = recipe })
+end
+
 function GuidedMissionManager:Begin()
     if self.started then
         return
     end
     self.started = true
+    self:SnapshotKnownRecipes()
 
     if self.completed then
         self:Sync()
@@ -112,6 +176,10 @@ function GuidedMissionManager:JumpTo(index)
     if index == nil or index < 1 or index > #Missions + 1 then
         return false
     end
+
+    -- A console jump can happen before Begin's snapshot; keep prototype
+    -- objectives from counting recipes the player already knew.
+    self:SnapshotKnownRecipes()
 
     if self.begin_task ~= nil then
         self.begin_task:Cancel()
@@ -177,7 +245,7 @@ function GuidedMissionManager:OnObjectiveEvent(event, data)
 
     local changed = false
     for i, objective in ipairs(self.current_mission.objectives or {}) do
-        local increment = Objectives.GetEventIncrement(objective, event, data)
+        local increment = Objectives.GetEventIncrement(objective, event, data, self.inst)
         if increment > 0 then
             self.progress[i] = (self.progress[i] or 0) + increment
             changed = true
@@ -197,8 +265,9 @@ function GuidedMissionManager:OnPoll()
         return
     end
 
-    -- Collect objectives are inventory-derived: reread them every poll. This
-    -- is the only place collect progress changes (see Objectives.ReconcileProgress).
+    -- collect/collect_food objectives are inventory-derived: reread them every poll.
+    -- This is the only place their progress changes (see
+    -- Objectives.ReconcileProgress).
     for i, objective in ipairs(self.current_mission.objectives or {}) do
         self.progress[i] = Objectives.ReconcileProgress(self.inst, objective, self.progress[i])
     end
