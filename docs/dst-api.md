@@ -57,6 +57,46 @@ documented and version-dependent.
 
 - `api_version = 10` for DST.
 - Requires `dst_compatible = true`, `all_clients_require_mod = true`, `client_only_mod = false`.
+- **Mod icon** (verified 2026-11-09): set `icon_atlas = "modicon.xml"` and
+  `icon = "modicon.tex"` in `modinfo.lua`. Both must be non-empty and present in the
+  mod folder; `modindex.lua:542-556` resolves them, derives `iconpath` from the atlas
+  directory (`modindex.lua:544-547`), and **clears all three fields with a
+  `WARNING: icon paths for mod ... are not valid` print** if either file is missing.
+  No `Assets` entry is needed in `modmain.lua` — `ModsScreen:LoadModInfoPrefabs`
+  (`screens/modsscreen.lua:1321`) preloads the atlas and image itself.
+- The Mods-menu detail pane draws the icon at **102×102**
+  (`screens/modsscreen.lua:1043-1048`); if `icon`/`icon_atlas` are unset (or invalid)
+  it falls back to `images/ui.xml` / `portrait_bg.tex`. Design for legibility at that
+  size — thin lines and small text disappear.
+- File format: the game loads `modicon.tex` (KTEX, compiled with ktools `ktech`) plus a
+  hand-writable single-element atlas:
+  `<Atlas><Texture filename="modicon.tex" /><Elements><Element name="modicon.tex" u1="0.00390625" u2="0.99609375" v1="0.00390625" v2="0.99609375" /></Elements></Atlas>`
+  (the u/v insets are 1/256). Source images of 256×256 and 128×128 both ship in
+  installed workshop mods; the menu downscales to 102 either way.
+- There is **no parchment/scroll/paper texture** in the base UI atlases
+  (`images.zip` has no matching `.tex` in `images/ui.xml` or
+  `images/crafting_menu.xml`; verified 2026-11-09). An icon that should reuse
+  vanilla art can be composed offline from the pieces the tracker already draws:
+  card frame `images/crafting_menu.xml` → `backing.tex`, `side.tex`, `top.tex`,
+  `bottom.tex` (dark carved wood, not paper); green `checkmark.tex`,
+  `line_horizontal_white.tex`, `arrow2_right.tex`, `red_star.tex`,
+  `yellow_exclamation.tex` and `pinslot_fg_pin.tex` in `images/ui.xml` /
+  `images/crafting_menu.xml`.
+- This repo's icon (`modicon.png` → `modicon.tex`) is the vanilla
+  `book_research_station.tex` item icon (the Everything Encyclopedia book) from
+  `images/inventoryimages1.xml` (64×64 source; the `inventoryimages.xml` lists the
+  same names but has no matching `.tex`), scaled 3× and placed inside the vanilla
+  default frame `images/ui.xml` → `portrait_bg.tex` (128×128, upscaled 2×). That is
+  the same frame the Mods screen falls back to when `icon`/`icon_atlas` are unset.
+  `tools/make_modicon.py` builds both files; it carries a minimal DXT5 KTEX writer
+  because ktools (`ktech`) is not installed on this machine. The KTEX header is the
+  known-good `0xFFFD2220` from an installed mod; mip data is stored bottom-up.
+- **KTEX alpha is premultiplied.** `tests/preview/render.py` (`decode_dxt5_block`,
+  ~line 69) un-premultiplies partial-alpha texels when decoding
+  (`r = r * 255 // a`) and produces no clipped values against vanilla atlases.
+  Consequence for any texture generated outside ktech: multiply RGB by alpha
+  before DXT5 encoding, or soft edges render too bright in-game. The checked-in
+  PNG stays straight-alpha; only the `.tex` data is premultiplied.
 
 ## Mod environment and strict mode
 
