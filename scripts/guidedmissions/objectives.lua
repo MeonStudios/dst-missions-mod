@@ -3,34 +3,6 @@ local GLOBAL = _G
 
 local Objectives = {}
 
--- Labels never carry a count: the tracker renders the counter separately.
-local DEFAULT_LABELS = {
-    collect = "Collect %s",
-    craft = "Craft %s",
-    build = "Build %s",
-    kill = "Kill %s",
-    survive = "Survive until day %d",
-    chop = "Chop down trees",
-    eat = "Eat %s",
-    heal = "Restore health",
-    sanity = "Restore sanity",
-    mine = "Mine boulders",
-    pick = "Pick %s",
-    collect_food = "Collect food",
-    cook = "Cook %s",
-    cookpot = "Cook %s",
-    prototype = "Prototype %s",
-}
-
-local function PrefabDisplayName(prefab)
-    if prefab == nil then
-        return "?"
-    end
-
-    local names = GLOBAL.STRINGS and GLOBAL.STRINGS.NAMES
-    return (names and names[string.upper(prefab)]) or prefab
-end
-
 function Objectives.GetCurrentDay()
     local world = GLOBAL.TheWorld
     -- DST has no `TheWorld.state.day`; the server's world state is
@@ -42,37 +14,10 @@ function Objectives.GetCurrentDay()
     return 1
 end
 
+-- `label` is required mission data, authored per objective. Labels never carry
+-- a count: the tracker renders the counter separately.
 function Objectives.GetLabel(objective)
-    if objective.label ~= nil then
-        return objective.label
-    end
-
-    local objective_type = objective.type
-    if objective_type == "survive" then
-        return string.format(DEFAULT_LABELS.survive, tonumber(objective.day) or 1)
-    end
-
-    -- `cook` is usually used for any food (no prefab); only format a name when
-    -- the mission narrows it to a specific cooked product.
-    if objective_type == "cook" and objective.prefab == nil then
-        return "Cook food"
-    end
-    if objective_type == "cookpot" and objective.prefab == nil then
-        return "Cook in a Crock Pot"
-    end
-
-    -- Likewise, `prototype` is usually "any new recipe"; format a product name
-    -- only when the mission targets one recipe.
-    if objective_type == "prototype" and objective.recipe == nil then
-        return "Prototype new recipes"
-    end
-
-    local pattern = DEFAULT_LABELS[objective_type]
-    if pattern == nil then
-        return "Unknown objective: " .. tostring(objective_type)
-    end
-
-    return string.format(pattern, PrefabDisplayName(objective.prefab))
+    return objective.label
 end
 
 -- The pre-formatted counter shown on the right of a tracker row.
@@ -94,19 +39,23 @@ end
 function Objectives.GetIconPrefab(objective)
     if objective.type == "chop" then
         -- A chop objective has no prefab of its own: trees are matched by tag,
-        -- not id. Show the log icon; `icon` lets a mission override it.
-        return objective.icon or "log"
+        -- not id. The default shows the axe that does the chopping; `icon` lets
+        -- a mission override it.
+        return objective.icon or "axe"
     end
     if objective.type == "mine" then
-        return objective.icon or "rocks"
+        -- Likewise for mining: default to the pickaxe, with `icon` to override.
+        return objective.icon or "pickaxe"
     end
     if objective.type == "heal" then
-        return objective.icon or "healingsalve"
+        -- The HUD health badge's heart glyph, like `brain` for sanity; `icon`
+        -- overrides it (for example with `healingsalve`).
+        return objective.icon or "heart"
     end
     if objective.type == "sanity" then
-        -- No inventory item represents "sanity"; `icon = "brain"` selects the
-        -- HUD sanity-brain art, and no icon leaves the row text-only.
-        return objective.icon
+        -- No inventory item represents "sanity", so the row defaults to the
+        -- HUD sanity-brain art (`brain`); `icon` overrides it.
+        return objective.icon or "brain"
     end
     if objective.type == "pick" then
         -- Plants are not inventory items, so most have no icon. The tracker has
@@ -114,18 +63,27 @@ function Objectives.GetIconPrefab(objective)
         -- item icon instead (e.g. berries for a berry bush).
         return objective.icon or objective.prefab
     end
+    if objective.type == "plant" then
+        -- The planted crop is a world entity with no inventory icon, but the
+        -- seed the player held has one (`carrot_seeds`, `pumpkin_seeds`, ...).
+        -- An unfiltered objective shows the generic seed art; `icon` overrides.
+        return objective.icon or objective.prefab or "seeds"
+    end
     if objective.type == "collect_food" then
         -- "Any food" has no single icon; `icon` can point at one.
         return objective.icon
     end
     if objective.type == "cook" or objective.type == "cookpot" then
-        return objective.icon or objective.prefab
+        -- The icon is the cooked product or dish itself, so `prefab` doubles
+        -- as the art id. There is no separate `icon` field; an unfiltered
+        -- objective has no single item to show and renders text-only.
+        return objective.prefab
     end
     if objective.type == "prototype" then
-        -- A targeted recipe shows its product's icon (recipe names are usually
-        -- the product prefab id); "any recipe" falls back to the blueprint
-        -- item. An explicit `icon` wins over both.
-        return objective.icon or objective.recipe or "blueprint"
+        -- A targeted recipe shows its product's icon (recipe id = product
+        -- prefab id); "any recipe" falls back to the blueprint item. An
+        -- explicit `icon` wins over both.
+        return objective.icon or objective.prefab or "blueprint"
     end
 
     if objective.type == "collect" or objective.type == "craft"
@@ -223,7 +181,8 @@ end
 --     player inflate the counter just by clicking their own inventory.
 -- Take the peak inventory count instead: it rises when items are acquired,
 -- never falls when they are spent or dropped, and internal inventory moves do
--- not change it.
+-- not change it. The manager calls this from its inventory-event handler
+-- (deferred one tick, see OnInventoryChanged), not from a periodic poll.
 function Objectives.ReconcileProgress(inst, objective, progress)
     local value = tonumber(progress) or 0
     if objective.type == "collect" then
@@ -395,12 +354,23 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
                 return 1
             end
         end
+    elseif event == "guidedmissions_plantedseed" then
+        -- Pushed by modmain's `farmplantable`/`deployable` post-inits, because
+        -- planting a seed in tilled farm soil emits no player event. `seed` is
+        -- the seed's prefab id (a string, like `carrot_seeds` or `seeds`), not
+        -- the crop that grows from it. See docs/dst-api.md, "Farming".
+        if objective.type == "plant" then
+            local seed = data.seed
+            if objective.prefab == nil or seed == objective.prefab then
+                return 1
+            end
+        end
     elseif event == "unlockrecipe" then
         -- Pushed by Builder:UnlockRecipe when a recipe is prototyped at a
         -- station or learned (blueprint, scanner). The data-less variant from
         -- Builder:GiveAllRecipes must not count. See docs/dst-api.md.
         if objective.type == "prototype" and data.recipe ~= nil
-            and (objective.recipe == nil or data.recipe == objective.recipe) then
+            and (objective.prefab == nil or data.recipe == objective.prefab) then
             return 1
         end
     end
@@ -411,11 +381,24 @@ end
 -- The objective types this module matches. Mission data is validated against
 -- this in tests/manager_test.lua: a misspelt type (`cood`, or `collect` with a
 -- made-up prefab) parses fine and then silently matches no event, so the
--- objective would never complete. DEFAULT_LABELS already enumerates exactly
--- the handled types.
-Objectives.VALID_TYPES = {}
-for objective_type in pairs(DEFAULT_LABELS) do
-    Objectives.VALID_TYPES[objective_type] = true
-end
+-- objective would never complete.
+Objectives.VALID_TYPES = {
+    collect = true,
+    craft = true,
+    build = true,
+    kill = true,
+    survive = true,
+    chop = true,
+    mine = true,
+    eat = true,
+    heal = true,
+    sanity = true,
+    pick = true,
+    plant = true,
+    collect_food = true,
+    cook = true,
+    cookpot = true,
+    prototype = true,
+}
 
 return Objectives

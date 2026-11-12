@@ -17,10 +17,19 @@ local function FindMissionIndexById(id)
     return nil
 end
 
+local function HasSurviveObjective(mission)
+    for _, objective in ipairs(mission.objectives or {}) do
+        if objective.type == "survive" then
+            return true
+        end
+    end
+    return false
+end
+
 -- Rows are `label|prefab|counter|done` joined by `;`, so the separators must
 -- never appear inside the free-form label.
 local function SanitiseLabel(text)
-    return (tostring(text or ""):gsub("[|;]", " "))
+    return (tostring(text):gsub("[|;]", " "))
 end
 
 -- Pack the mission's objectives into the client's row format. `force_done`
@@ -54,11 +63,24 @@ local GuidedMissionManager = Class(function(self, inst)
     -- the first sighting. Seeded from builder.recipes after load (Begin).
     self.known_recipes = {}
 
-    -- No `itemget` listener: collect progress is read from the inventory by
-    -- the poller (see Objectives.ReconcileProgress for why events cannot be
-    -- trusted). Crafting/building and kills are event-driven.
+    -- Pending deferred inventory reread (see OnInventoryChanged).
+    self.inventory_task = nil
+    -- Last world day the survive counter was synced for (see OnPoll).
+    self.last_poll_day = nil
+
+    -- Inventory-derived objectives (collect, collect_food) are reread from the
+    -- inventory, never accumulated from events -- but an event is still what
+    -- triggers the reread. These four cover every way an item joins the
+    -- inventory; see Objectives.ReconcileProgress and docs/dst-api.md.
     -- Inventory-item recipes (torch) fire `builditem`; structures (firepit,
     -- researchlab) fire `buildstructure` instead. See objectives.lua.
+    local function oninventory(_, _)
+        self:OnInventoryChanged()
+    end
+    inst:ListenForEvent("itemget", oninventory)
+    inst:ListenForEvent("gotnewitem", oninventory)
+    inst:ListenForEvent("newactiveitem", oninventory)
+    inst:ListenForEvent("setoverflow", oninventory)
     inst:ListenForEvent("builditem", function(_, data)
         self:OnObjectiveEvent("builditem", data)
     end)
@@ -73,10 +95,11 @@ local GuidedMissionManager = Class(function(self, inst)
     -- tree or a finished boulder from the rest. `oneat` fires on the eater with
     -- the food entity, `picksomething` on the picker with the plant,
     -- `healthdelta`/`sanitydelta` on any stat change. All are pushed server-side.
-    -- `guidedmissions_cookedfood` and `guidedmissions_stewedfood` are pushed by
-    -- modmain's `cooker`/`stewer` component post-inits, because vanilla fire and
-    -- crockpot cooking emit no player event. `unlockrecipe` is vanilla:
-    -- Builder:UnlockRecipe pushes it when a recipe is prototyped or learned.
+    -- `guidedmissions_cookedfood`, `guidedmissions_stewedfood` and
+    -- `guidedmissions_plantedseed` are pushed by modmain's component post-inits,
+    -- because vanilla fire cooking, crockpot cooking and seed planting emit no
+    -- player event. `unlockrecipe` is vanilla: Builder:UnlockRecipe pushes it
+    -- when a recipe is prototyped or learned.
     inst:ListenForEvent("working", function(_, data)
         self:OnObjectiveEvent("working", data)
     end)
@@ -98,12 +121,16 @@ local GuidedMissionManager = Class(function(self, inst)
     inst:ListenForEvent("guidedmissions_stewedfood", function(_, data)
         self:OnObjectiveEvent("guidedmissions_stewedfood", data)
     end)
+    inst:ListenForEvent("guidedmissions_plantedseed", function(_, data)
+        self:OnObjectiveEvent("guidedmissions_plantedseed", data)
+    end)
     inst:ListenForEvent("unlockrecipe", function(_, data)
         self:OnUnlockRecipe(data)
     end)
 
-    -- Survival objectives depend on world day, and this also refreshes the
-    -- "day X" display in the tracker.
+    -- The only time-based objective left is `survive`, whose counter follows
+    -- the world day. Every other type is event-driven, including the
+    -- inventory-derived ones, so OnPoll no-ops unless a survive row exists.
     self.poll_task = inst:DoPeriodicTask(1, function()
         self:OnPoll()
     end)
@@ -165,14 +192,35 @@ function GuidedMissionManager:Begin()
     self:SetMission(1)
 end
 
--- Switch to an arbitrary mission (1-based), discarding progress on the current
--- one. `#Missions + 1` is the terminal "all missions complete" state. Returns
--- false for an out-of-range index and changes nothing in that case. Used by the
--- /resetmissions and /setmission admin commands. Tracker state only: no game
--- state is touched, and the inventory is left alone (it counts as starting
--- inventory for collect objectives, exactly as a fresh mission would).
-function GuidedMissionManager:JumpTo(index)
-    index = tonumber(index)
+-- Jump targets can be a 1-based mission number (2 or "2") or a stable mission
+-- id ("green_thumb"). Ids are what save state keys on, so naming one is
+-- clearer than counting positions in missions.lua. An unknown id resolves to
+-- nil and is rejected like an out-of-range number.
+local function ResolveMissionIndex(target)
+    if type(target) == "number" then
+        return target
+    end
+    if type(target) ~= "string" then
+        return nil
+    end
+
+    local numeric = tonumber(target)
+    if numeric ~= nil then
+        return numeric
+    end
+    return FindMissionIndexById(target)
+end
+
+-- Switch to an arbitrary mission, discarding progress on the current one.
+-- Accepts a 1-based index or a mission id (see ResolveMissionIndex).
+-- `#Missions + 1` is the terminal "all missions complete" state, reachable by
+-- number only. Returns false for an unknown target and changes nothing in that
+-- case. Used by the c_resetmissions/c_setmission admin commands. Tracker state
+-- only: no game state is touched, and the inventory is left alone (it counts
+-- as starting inventory for collect objectives, exactly as a fresh mission
+-- would).
+function GuidedMissionManager:JumpTo(target)
+    local index = ResolveMissionIndex(target)
     if index == nil or index < 1 or index > #Missions + 1 then
         return false
     end
@@ -218,6 +266,7 @@ function GuidedMissionManager:SetMission(index)
     self.completed = false
     self.current_mission = mission
     self.progress = {}
+    self.last_poll_day = nil
 
     for i, objective in ipairs(mission.objectives or {}) do
         self.progress[i] = Objectives.InitialProgress(self.inst, objective)
@@ -230,7 +279,7 @@ function GuidedMissionManager:SetMission(index)
         "%s - Mission %d: %s",
         self.inst:GetDisplayName(),
         index,
-        mission.title or "Untitled"
+        mission.title
     ))
 
     -- A freshly activated mission can already be satisfied (for example, a
@@ -260,17 +309,61 @@ function GuidedMissionManager:OnObjectiveEvent(event, data)
     end
 end
 
-function GuidedMissionManager:OnPoll()
+-- Defer the reread by a tick: `gotnewitem` is pushed *before* the item is
+-- placed or merged (components/inventory.lua:1100 vs the `stackable:Put` at
+-- :1146), so reconciling inside the event handler would read a stale count.
+-- Coalesce a burst of pickups into one reread.
+function GuidedMissionManager:OnInventoryChanged()
+    if self.completed or self.current_mission == nil or self.inventory_task ~= nil then
+        return
+    end
+
+    self.inventory_task = self.inst:DoTaskInTime(0, function()
+        self.inventory_task = nil
+        self:ReconcileInventory()
+    end)
+end
+
+-- Reread every inventory-derived objective and keep the peak. Events only
+-- trigger this; the count always comes from `inventory:ForEachItem`, so a
+-- spurious event cannot inflate progress (see Objectives.ReconcileProgress).
+function GuidedMissionManager:ReconcileInventory()
     if self.completed or self.current_mission == nil then
         return
     end
 
-    -- collect/collect_food objectives are inventory-derived: reread them every poll.
-    -- This is the only place their progress changes (see
-    -- Objectives.ReconcileProgress).
+    local changed = false
     for i, objective in ipairs(self.current_mission.objectives or {}) do
-        self.progress[i] = Objectives.ReconcileProgress(self.inst, objective, self.progress[i])
+        local value = Objectives.ReconcileProgress(self.inst, objective, self.progress[i])
+        if value ~= self.progress[i] then
+            self.progress[i] = value
+            changed = true
+        end
     end
+
+    if changed then
+        self:CheckCompletion()
+        if not self.completed and self.current_mission ~= nil then
+            self:Sync()
+        end
+    end
+end
+
+-- Only `survive` still needs a periodic read. Syncing only when the day
+-- changes keeps an idle mission down to one timer wake-up per second.
+function GuidedMissionManager:OnPoll()
+    if self.completed or self.current_mission == nil then
+        return
+    end
+    if not HasSurviveObjective(self.current_mission) then
+        return
+    end
+
+    local day = Objectives.GetCurrentDay()
+    if day == self.last_poll_day then
+        return
+    end
+    self.last_poll_day = day
 
     self:CheckCompletion()
     if not self.completed and self.current_mission ~= nil then
@@ -302,7 +395,7 @@ function GuidedMissionManager:CompleteCurrentMission()
     -- Show the completed card before clearing state. This mod is informational
     -- only: completing a mission never changes game state.
     Netvars.Write(self.inst, {
-        title = mission.title or "Mission",
+        title = mission.title,
         subtext = mission.subtext or "",
         rows = FormatRows(mission, self.progress, true),
         state = "won",
@@ -316,7 +409,7 @@ function GuidedMissionManager:CompleteCurrentMission()
     self:Announce(string.format(
         "%s completed: %s",
         self.inst:GetDisplayName(),
-        mission.title or "Untitled"
+        mission.title
     ))
 
     if self.hold_task ~= nil then
@@ -349,7 +442,7 @@ function GuidedMissionManager:Sync()
     end
 
     Netvars.Write(self.inst, {
-        title = mission.title or "Mission",
+        title = mission.title,
         subtext = mission.subtext or "",
         rows = FormatRows(mission, self.progress, false),
         state = "active",
@@ -421,6 +514,11 @@ function GuidedMissionManager:OnRemoveFromEntity()
     if self.poll_task ~= nil then
         self.poll_task:Cancel()
         self.poll_task = nil
+    end
+
+    if self.inventory_task ~= nil then
+        self.inventory_task:Cancel()
+        self.inventory_task = nil
     end
 
     if self.hold_task ~= nil then

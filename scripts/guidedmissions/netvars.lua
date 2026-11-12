@@ -52,8 +52,11 @@ end
 function Netvars.Write(inst, state)
     for _, field in ipairs(FIELDS) do
         local netvar = inst[FIELD_VARS[field]]
-        if netvar ~= nil then
-            netvar:set(state[field] or "")
+        local value = state[field] or ""
+        -- Skip identical values: a write can push the client's dirty event,
+        -- and there is nothing new to render when nothing changed.
+        if netvar ~= nil and netvar:value() ~= value then
+            netvar:set(value)
         end
     end
 end

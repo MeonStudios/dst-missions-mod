@@ -285,14 +285,111 @@ if type(sanity_postinit) == "function" then
     Check("sanity wrapper leaves DoDelta behaviour intact", sanity.current == 70)
 end
 
+-- ---- farmplantable post-init ----------------------------------------------
+-- Planting a seed in tilled soil has no vanilla player event; modmain wraps
+-- FarmPlantable:Plant to report the seed. A successful Plant removes the seed,
+-- so the wrapper must read the prefab first.
+
+local farmplantable_postinit = component_postinits.farmplantable
+Check("farmplantable post-init registered", type(farmplantable_postinit) == "function")
+
+local function NewFarmPlantable(planted)
+    local component = {
+        inst = { prefab = "carrot_seeds" },
+        target = { HasTag = function() return true end },
+    }
+    function component:Plant()
+        return planted
+    end
+    return component
+end
+
+if type(farmplantable_postinit) == "function" then
+    local component = NewFarmPlantable(true)
+    farmplantable_postinit(component)
+    local planter = NewChef()
+    Check("farmplantable wrapper returns Plant's result",
+        component:Plant({}, planter) == true)
+    Check("planting reports the seed",
+        #planter.events == 1 and planter.events[1].name == "guidedmissions_plantedseed")
+    Check("plantedseed event carries the seed prefab",
+        planter.events[1] ~= nil and planter.events[1].data.seed == "carrot_seeds")
+
+    -- A refused plant (wrong target, no crop) must report nothing.
+    local refused = NewFarmPlantable(false)
+    farmplantable_postinit(refused)
+    local refused_planter = NewChef()
+    Check("refused plant returns false", refused:Plant({}, refused_planter) == false)
+    Check("refused plant reports nothing", #refused_planter.events == 0)
+
+    -- No planter must not error.
+    local planterless = NewFarmPlantable(true)
+    farmplantable_postinit(planterless)
+    Check("plant without a planter is safe", planterless:Plant({}) == true)
+end
+
+-- ---- deployable post-init -------------------------------------------------
+-- Wormwood plants seeds through deployable (restrictedtag "plantkin"); that
+-- path spawns the crop directly, so it is reported separately from PLANTSOIL.
+
+local deployable_postinit = component_postinits.deployable
+Check("deployable post-init registered", type(deployable_postinit) == "function")
+
+local function NewDeployable(is_seed, deployed)
+    local component = { inst = { prefab = is_seed and "seeds" or "tent" } }
+    if is_seed then
+        component.inst.components = { farmplantable = {} }
+    else
+        component.inst.components = {}
+    end
+    function component:Deploy()
+        return deployed, "reason"
+    end
+    return component
+end
+
+if type(deployable_postinit) == "function" then
+    local seed = NewDeployable(true, true)
+    deployable_postinit(seed)
+    local planter = NewChef()
+    local deployed, reason = seed:Deploy({}, planter)
+    Check("deployable wrapper returns Deploy's result",
+        deployed == true and reason == "reason")
+    Check("deploying a seed reports the seed",
+        #planter.events == 1 and planter.events[1].name == "guidedmissions_plantedseed")
+    Check("deployed seed event carries the seed prefab",
+        planter.events[1] ~= nil and planter.events[1].data.seed == "seeds")
+
+    -- Deploying anything else (a tent, a boat) is not planting.
+    local other = NewDeployable(false, true)
+    deployable_postinit(other)
+    local other_planter = NewChef()
+    other:Deploy({}, other_planter)
+    Check("deploying a non-seed reports nothing", #other_planter.events == 0)
+
+    -- A refused deploy (CanDeploy false) must report nothing.
+    local refused = NewDeployable(true, false)
+    deployable_postinit(refused)
+    local refused_planter = NewChef()
+    Check("refused deploy returns false", refused:Deploy({}, refused_planter) == false)
+    Check("refused deploy reports nothing", #refused_planter.events == 0)
+end
+
 -- ---- fake players ---------------------------------------------------------
 
 local jumps = {}
+-- Mission ids the fake manager resolves, mirroring missions.lua.
+local mission_ids = { first = 1, second = 2 }
 local function NewPlayer(userid)
     local manager = {}
-    -- Mirrors GuidedMissionManager:JumpTo's contract: out-of-range indices
+    -- Mirrors GuidedMissionManager:JumpTo's contract: a number or numeric
+    -- string is an index, any other string is a mission id, unknown targets
     -- change nothing and return false.
-    function manager:JumpTo(index)
+    function manager:JumpTo(target)
+        local index = target
+        if type(target) == "string" then
+            index = tonumber(target) or mission_ids[target]
+        end
         if index == nil or index < 1 or index > 99 then
             return false
         end
@@ -328,15 +425,22 @@ Run(_G.c_setmission, 3)
 Check("c_setmission jumps on the server", LastJump() == 3, LastJump())
 
 -- The console may hand the argument over as a string (and the RPC path
--- always does), so the command must coerce it.
+-- always does); the manager resolves a numeric string to that index.
 Run(_G.c_setmission, "5")
-Check("c_setmission coerces a string argument",
+Check("c_setmission accepts a numeric string argument",
     LastJump() == 5 and type(LastJump()) == "number", LastJump())
+
+Run(_G.c_setmission, "second")
+Check("c_setmission jumps by mission id", LastJump() == 2, LastJump())
 
 local before = #jumps
 Run(_G.c_setmission, "abc")
-Check("c_setmission rejects a non-number", #jumps == before)
-Check("c_setmission prints usage for a non-number",
+Check("c_setmission rejects an unknown id", #jumps == before)
+Check("c_setmission reports an unknown id",
+    OutputContains("Invalid mission number or id"))
+
+Run(_G.c_setmission)
+Check("c_setmission prints usage for no argument",
     OutputContains("Usage: c_setmission(n)"))
 
 Run(_G.c_setmission, 0)
@@ -366,9 +470,19 @@ Check("local c_setmission sends the setmission RPC",
 Check("local c_setmission forwards the mission number",
     sent ~= nil and sent.n == 1 and sent.args[1] == 4, sent ~= nil and sent.args[1])
 
+-- A mission id is forwarded as-is; the server-side manager resolves it.
+local before_local = #sent_rpcs
+Run(_G.c_setmission, "second")
+local id_sent = sent_rpcs[#sent_rpcs]
+Check("local c_setmission forwards a mission id",
+    #sent_rpcs == before_local + 1
+    and id_sent.id_table.id == "setmission"
+    and id_sent.args[1] == "second",
+    id_sent ~= nil and id_sent.args[1])
+
 Run(_G.c_resetmissions)
 Check("local c_resetmissions sends the resetmissions RPC",
-    #sent_rpcs == 2 and sent_rpcs[#sent_rpcs].id_table.id == "resetmissions")
+    #sent_rpcs == 3 and sent_rpcs[#sent_rpcs].id_table.id == "resetmissions")
 
 -- ---- RPC handlers (server side) ------------------------------------------
 
@@ -382,6 +496,11 @@ if type(handler) == "function" then
     Run(handler, server_player, 6)
 end
 Check("setmission RPC handler applies an admin jump", LastJump() == 6, LastJump())
+
+if type(handler) == "function" then
+    Run(handler, server_player, "first")
+end
+Check("setmission RPC handler resolves a mission id", LastJump() == 1, LastJump())
 
 local non_admin = NewPlayer("KU_guest")
 net.clients.KU_guest = { admin = false }

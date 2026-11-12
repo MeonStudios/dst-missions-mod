@@ -451,6 +451,18 @@ local CASES = {
         },
     },
     {
+        "heal_2row",
+        {
+            title = "An Apple a Day...",
+            subtext = "Wings, mostly. Don't ask.",
+            rows = table.concat({
+                ROW("Eat a butterfly wing", "butterflywings", "0/1"),
+                ROW("Restore health", "heart", "0/10"),
+            }, ";"),
+            state = "active",
+        },
+    },
+    {
         "won",
         {
             title = "See the Dawn",

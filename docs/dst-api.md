@@ -36,6 +36,7 @@ processes, takes minutes, and is the slowest way to answer anything.
 | Why an undeclared global errored | `scripts/strict.lua` |
 | `AddPlayerPostInit`, `AddPrefabPostInit`, `GetModConfigData` | `scripts/modutil.lua` |
 | Player event sources | `scripts/components/inventory.lua`, `builder.lua`, `combat.lua` |
+| Farming / planting seeds | `scripts/components/farmplantable.lua`, `scripts/actions.lua` (`PLANTSOIL`), `scripts/componentactions.lua` |
 | Components (general) | **`scripts/components/`** — not `scripts/` |
 | `player.HUD` and HUD construction | `scripts/prefabs/player_common.lua`, `scripts/screens/playerhud.lua` |
 | UI globals (`DEFAULTFONT`, `ANCHOR_*`) | `scripts/fonts.lua`, `scripts/constants.lua` |
@@ -138,15 +139,31 @@ documented and version-dependent.
       item is clicked onto the cursor, and giving it back fires it again — so
       accumulating stack size on `itemget` lets a player inflate a counter by
       clicking their own inventory repeatedly. **Never accumulate collect progress
-      from `itemget`.** `collect` objectives are inventory-derived: the poller takes
-      the peak `inventory:ForEachItem` count (see `objectives.lua`
+      from `itemget`.** `collect` objectives are inventory-derived: the manager
+      rereads the peak `inventory:ForEachItem` count (see `objectives.lua`
       `ReconcileProgress`), which also survives spending or dropping the items.
   - `gotnewitem` → `{ item, slot }` fires for stack merges too (`inventory.lua:1100`),
     but it *also* fires when a player moves an item into a carried container such as
     their own backpack (`components/container.lua` ~491/508). It is a pickup-sound
     event, not a reliable "acquired something new" signal; do not use it to grant
-    collect progress. Reconcile collect objectives against
-    `inventory:ForEachItem` instead (see `objectives.lua` `ReconcileProgress`).
+    collect progress. Use it only as a *trigger* to reread
+    `inventory:ForEachItem` (see `objectives.lua` `ReconcileProgress`).
+  - **Inventory-gain events (usable as reread triggers).** There is no single
+    "inventory changed" event. Four player events cover every way an item can
+    join the counted inventory:
+    - `itemget` — empty inventory slot (`inventory.lua:1151`) and cursor pickup
+      (`:1020`);
+    - `gotnewitem` — stack merges, empty slots, and worn-container puts
+      (`inventory.lua:1100`, `:1204`; `container.lua:491/508/550`);
+    - `newactiveitem` — inventory full, item goes to the cursor
+      (`inventory.lua:1254-1256`);
+    - `setoverflow` — a body container (backpack) is equipped
+      (`inventory.lua:1370`), which brings its contents into `ForEachItem`.
+    **Ordering caveat:** `gotnewitem` is pushed *before* the item is placed or
+    merged (`inventory.lua:1100` precedes the `stackable:Put` at `:1146`; the
+    container paths likewise push before `Put`), so a reread inside the handler
+    sees a stale count. Defer it one tick. Removals need no event when progress
+    is peak-held.
   - `builditem` → `{ item = <entity>, recipe = <recipe>, skin, prototyper }`, pushed by
     `components/builder.lua` (~line 741) **only when the product has an
     `inventoryitem` component** (torch, tool, most craftables).
@@ -273,10 +290,67 @@ documented and version-dependent.
   `secondaryfoodtype == "BERRY"` catches either variety. Carrots are plain `VEGGIE`, as
   are mushrooms/corn/etc., so `foodtype == "VEGGIE"` is broad. The edible property
   setters also add `edible_<foodtype>` tags (`components/edible.lua:9-15`), but reading
-  the fields avoids relying on when the tag was applied.
+  the fields avoids relying on when the tag was applied. The full `FOODTYPE` set
+  (`constants.lua:2026-2047`) is `GENERIC`, `MEAT`, `VEGGIE`, `ELEMENTAL`, `GEARS`,
+  `HORRIBLE`, `INSECT`, `SEEDS` (plural — not `SEED`), `BERRY`, `RAW`, `BURNT`, `NITRE`,
+  `ROUGHAGE`, `WOOD`, `GOODIES`, `MONSTER`, `LUNAR_SHARDS`, `CORPSE`, `MIASMA`.
+  Comparisons are exact strings.
 - `Inventory:ForEachItem` (`components/inventory.lua:667-685`) visits item slots, equip
-  slots, the active/cursor item and the overflow container. It does **not** recurse into
-  a worn backpack's contents.
+  slots, the active/cursor item and the overflow container. The overflow container
+  **is** a worn body container: `GetOverflowContainer` (`:1459-1467`) returns the
+  equipped `EQUIPSLOTS.BODY` item when it has an openable `container`, and a backpack
+  keeps `canbeopened = true` while worn (`prefabs/backpack.lua` only toggles it on
+  ignite/extinguish, lines 212-222). So `ForEachItem` **does** count a worn backpack's
+  contents; it does not recurse into other carried containers.
+
+## Farming and planting
+
+- **Tilled farm plots are `farm_soil` entities** (`prefabs/farm_soil.lua`): the
+  hoe/plow tills ground into these, and they are the only targets carrying the
+  `soil` tag (the prefab adds it at `:115`). Seeds are the items with a
+  `farmplantable` component.
+- **Planting in tilled soil fires no player event.**
+  `componentactions.lua:1235` inserts `ACTIONS.PLANTSOIL` when the held item has
+  a `farmplantable` component and the target has the `soil` tag and is not
+  `NOCLICK`. `ACTIONS.PLANTSOIL.fn` (`actions.lua:4727-4745`) removes the seed
+  from the doer's inventory and calls `FarmPlantable:Plant(target, doer)`,
+  giving the seed back if that returns false.
+- **`FarmPlantable:Plant`** (`components/farmplantable.lua:7-30`) requires
+  `self.plant` and a `soil` target, computes the crop prefab with
+  `FunctionOrValue(self.plant, self.inst)`, removes the soil, spawns the crop,
+  pushes `on_planted` on the **crop** with `{ doer, seed, in_soil = true }`, and
+  pushes `itemplanted` on **TheWorld** with `{ doer, pos }`. `self.inst` is the
+  seed entity and is removed on success (`:25`), so read its prefab before
+  calling. There is no event on the planter.
+- **`itemplanted` is not a seed-planting signal.** It is pushed by the old farm
+  `grower` component (`components/grower.lua:144`) and by unrelated prefabs
+  (mushroom farm, seastack, waterplant rock, winter tree stand); the component
+  file itself notes "this event is pushed in other places too". Hook the
+  component that performs the plant instead.
+- **Seed prefabs:** the generic seed is `seeds` (`prefabs/seeds.lua:159-160`,
+  `farmplantable.plant = pickfarmplant` → `farm_plant_randomseed`); crop seeds
+  are `<crop>_seeds` (`prefabs/veggies.lua:514-515`, `farmplantable.plant =
+  "farm_plant_<crop>"`). The same files also add a `plantable` component
+  (deprecated, for crafted farm structures) and a `deployable` component.
+- **Seeds are deployable only for Wormwood.** Their `deployable` has
+  `restrictedtag = "plantkin"`, and `Deployable:IsDeployable`
+  (`components/deployable.lua:88-90`) requires the deployer to carry that tag
+  (Wormwood; `debugcommands.lua:2163`). `Deployable:Deploy` (`:132-147`) calls
+  the seed's `ondeploy` callback, which spawns the crop directly instead of
+  going through `FarmPlantable:Plant`, then pushes `deployitem` on the deployer
+  and returns `true`. After a successful deploy the seed is already removed, so
+  capture `inst.prefab` before the call. Normal characters cannot reach this
+  path.
+- **The old farm structures are retired.** `prefabs/farmplot.lua` only returns
+  `slow_farmplot`/`fast_farmplot` (the plain `farmplot` prefab is commented out
+  at `:375`) and plants through `Grower:PlantItem`
+  (`components/grower.lua:110-147`), which uses the `plantable` component and
+  pushes no player event either.
+- **Consequence for this mod:** `modmain.lua` wraps `FarmPlantable:Plant` and
+  `Deployable:Deploy`, pushing `guidedmissions_plantedseed` with
+  `{ seed = <seed prefab id> }` to the planter. The planted crop itself is not
+  reported; matching filters on the seed (`carrot_seeds`), not the crop
+  (`farm_plant_carrot`).
 
 ## Recipe prototyping
 
@@ -510,7 +584,8 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
 - Verified 2026-10-31 (build 761239): all of `log` (#2), `flint` (#2), `firepit` (#2),
   `goldnugget` (#2), `twigs` (#3), `torch` (#3), `spider` (#3), `researchlab` (#3) resolve
   with `<prefab>.tex` and no rename. Also verified from the atlas XML: `rocks.tex`,
-  `petals.tex` and `healingsalve.tex` exist (icons for mine / pick / heal rows), while
+  `petals.tex` and `healingsalve.tex` exist (icons for mine and pick rows, and a heal
+  override), while
   `flower.tex` does not — flowers are world plants, not inventory items. `hound.tex`
   exists **only** in `images/scrapbook_icons1.xml`, so it does **not** resolve through
   this helper. `researchlab` has no `prefabs/researchlab.lua` — the id is created in
@@ -547,12 +622,17 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
   anchored the art's base.
   The offline preview cannot draw anims (`render.py` decodes KTEX atlases and BMFonts
   only), so anim icons are laid out but blank in `tests/preview/out`.
-- **Sanity brain art**: `images/global_redux.xml` (`prefabs/global.lua:456`) contains
-  `status_sanity.tex` and `status_sanity_bad.tex` (128x128 brain glyphs with a soft dark
-  halo, transparent outside it) — the sanity badge art. `images/scrapbook_icons1.xml` also has
-  `icon_sanity.tex` (124x124 brain in an orange badge). The tracker maps the icon id
-  `brain` to `status_sanity.tex` via a small override table; neither id is an inventory
-  item.
+- **HUD status-badge art**: `images/global_redux.xml` (`prefabs/global.lua:456`) contains
+  `status_sanity.tex`, `status_sanity_bad.tex`, `status_health.tex`,
+  `status_health_bad.tex`, `status_hunger.tex` and `status_hunger_bad.tex` — the status
+  badge glyphs, drawn on one 2048 atlas in the same UV grid (each element spans 0.062 of
+  the atlas, i.e. 128x128, with a soft dark halo transparent outside it). Verified
+  2026-11-12 from `images/global_redux.xml` inside `data/databundles/images.zip`. The
+  tracker maps the icon ids `brain` → `status_sanity.tex` and `heart` →
+  `status_health.tex` via a small override table; they are the default icons for
+  `sanity` and `heal` rows. Neither id is an inventory item.
+  `images/scrapbook_icons1.xml` also has `icon_sanity.tex` (124x124 brain in an orange
+  badge), unused by the tracker.
 - Icons for non-item rows (e.g. a "survive until day N" row) have no item texture. Vanilla
   candidates, all in atlases declared unconditionally in `prefabs/global.lua`:
   `images/customisation.xml` → `day.tex` (127x127, a "DAY" wax-seal card; atlas declared at

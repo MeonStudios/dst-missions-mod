@@ -27,12 +27,13 @@ local CRAFTING_ATLAS = "images/crafting_menu.xml"
 local UI_ATLAS = "images/ui.xml"
 
 -- Icon ids that use a static UI texture instead of an inventory image.
--- `brain` is the id the sanity objective uses; the texture is the brain glyph
--- from the HUD sanity badge. `images/global_redux.xml` is preloaded by the
--- global prefab (`scripts/prefabs/global.lua:456`), so no Assets entry is
--- needed.
+-- `brain` and `heart` are the ids the sanity and heal objectives use; the
+-- textures are the brain and heart glyphs from the HUD status badges.
+-- `images/global_redux.xml` is preloaded by the global prefab
+-- (`scripts/prefabs/global.lua:456`), so no Assets entry is needed.
 local ICON_IMAGES = {
     brain = { "images/global_redux.xml", "status_sanity.tex" },
+    heart = { "images/global_redux.xml", "status_health.tex" },
 }
 
 -- Icon ids drawn from a vanilla world animation. `flower` is a world plant

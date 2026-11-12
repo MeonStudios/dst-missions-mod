@@ -1,9 +1,9 @@
 -- modmain runs in a sandboxed environment (mods.lua CreateEnvironment) that
 -- whitelists only pairs/ipairs/print/math/table/type/string/tostring/require/
 -- Class. There is no fallback to _G, so any other base-library function must be
--- reached through GLOBAL. Missing `tonumber` is what broke c_setmission().
+-- reached through GLOBAL. Missing `tonumber` is what broke c_setmission()
+-- originally; the commands below stick to `type`/`tostring` instead.
 local GLOBAL = GLOBAL
-local tonumber = GLOBAL.tonumber
 
 local MissionNetvars = require("guidedmissions/netvars")
 local Settings = require("guidedmissions/settings")
@@ -21,6 +21,8 @@ Settings.announce_missions = GetModConfigData("ANNOUNCE_MISSIONS") ~= false
 -- Admin testing commands, callable from the debug console (`~`):
 --   c_resetmissions()   restart your chain from mission 1
 --   c_setmission(n)     jump to mission n (1-based, order of missions.lua)
+--   c_setmission("id")  jump to the mission with that id (quote it; ids are
+--                       the lowercase `id` field in missions.lua)
 -- They are real globals because the console's autocomplete scans `_G` for
 -- functions starting with `c_` (screens/consolescreen.lua). Slash commands are
 -- not an option: the redux chat box sends every line with TheNet:Say and never
@@ -39,20 +41,20 @@ local function IsAdmin(player)
     return client ~= nil and client.admin == true
 end
 
-local function ApplyJump(player, index)
+local function ApplyJump(player, target)
     local manager = player ~= nil and player.components.guidedmissionmanager or nil
     if manager == nil then
         return
     end
-    if not manager:JumpTo(index) then
-        print("[Guided Missions] Invalid mission number: " .. tostring(index))
+    if not manager:JumpTo(target) then
+        print("[Guided Missions] Invalid mission number or id: " .. tostring(target))
     end
 end
 
-AddModRPCHandler(RPC_NAMESPACE, "setmission", function(player, index)
+AddModRPCHandler(RPC_NAMESPACE, "setmission", function(player, target)
     -- Any client can send an RPC, so re-check admin on the server.
     if IsAdmin(player) then
-        ApplyJump(player, index)
+        ApplyJump(player, target)
     end
 end)
 
@@ -74,10 +76,11 @@ GLOBAL.c_resetmissions = function()
     end
 end
 
-GLOBAL.c_setmission = function(index)
-    index = tonumber(index)
-    if index == nil then
-        print("[Guided Missions] Usage: c_setmission(n), where n is a mission number")
+GLOBAL.c_setmission = function(target)
+    -- A number or numeric string is a 1-based mission index; any other string
+    -- is a mission id ("green_thumb"). The manager resolves either.
+    if type(target) ~= "number" and type(target) ~= "string" then
+        print("[Guided Missions] Usage: c_setmission(n) or c_setmission(\"mission_id\")")
         return
     end
 
@@ -86,9 +89,9 @@ GLOBAL.c_setmission = function(index)
             print("[Guided Missions] c_setmission: no player; run it from an in-game admin's Remote console")
             return
         end
-        ApplyJump(GLOBAL.ThePlayer, index)
+        ApplyJump(GLOBAL.ThePlayer, target)
     elseif GLOBAL.TheNet:GetIsServerAdmin() then
-        SendModRPCToServer(GetModRPC(RPC_NAMESPACE, "setmission"), index)
+        SendModRPCToServer(GetModRPC(RPC_NAMESPACE, "setmission"), target)
     end
 end
 
@@ -151,6 +154,43 @@ AddComponentPostInit("stewer", function(self)
             })
         end
         return result
+    end
+end)
+
+-- Planting a seed in tilled farm soil emits no player event. The seed item
+-- (`seeds`, `carrot_seeds`, ...) carries the `farmplantable` component, and the
+-- PLANTSOIL action calls FarmPlantable:Plant(target, planter); report the seed
+-- to the planter when that returns true. Capture the prefab before the call:
+-- a successful Plant removes the seed entity. See docs/dst-api.md, "Farming".
+AddComponentPostInit("farmplantable", function(self)
+    local _Plant = self.Plant
+    self.Plant = function(component, target, planter)
+        local seed_prefab = component.inst.prefab
+        local planted = _Plant(component, target, planter)
+        if planted and planter ~= nil and planter.PushEvent ~= nil then
+            planter:PushEvent("guidedmissions_plantedseed", { seed = seed_prefab })
+        end
+        return planted
+    end
+end)
+
+-- Wormwood is the only `plantkin`, so seeds are deployable for him and only
+-- him (`deployable.restrictedtag = "plantkin"`); that path calls the seed's
+-- ondeploy callback directly instead of FarmPlantable:Plant. Report it with
+-- the same event. `is_seed` is read before the call because a successful
+-- deploy removes the seed.
+AddComponentPostInit("deployable", function(self)
+    local _Deploy = self.Deploy
+    self.Deploy = function(component, pt, deployer, rot)
+        local inst = component.inst
+        local is_seed = inst ~= nil and inst.components ~= nil
+            and inst.components.farmplantable ~= nil
+        local seed_prefab = inst ~= nil and inst.prefab or nil
+        local deployed, reason = _Deploy(component, pt, deployer, rot)
+        if is_seed and deployed and deployer ~= nil and deployer.PushEvent ~= nil then
+            deployer:PushEvent("guidedmissions_plantedseed", { seed = seed_prefab })
+        end
+        return deployed, reason
     end
 end)
 

@@ -9,9 +9,10 @@ Lua 5.1/LuaJIT semantics. No build step: this directory *is* the mod folder.
 
 | File | Role |
 |---|---|
-| `scripts/guidedmissions/missions.lua` | The mission chain. Normally the only file you edit; the objective schema is documented inline. |
+| `scripts/guidedmissions/missions.lua` | The mission chain. Normally the only file you edit; the objective schema and every option are in `docs/objectives.md`. |
 | `scripts/guidedmissions/manager.lua` | Server state machine, event listeners, `OnSave`/`OnLoad`. |
 | `scripts/guidedmissions/objectives.lua` | Objective labels, progress, matching, completion. |
+| `docs/objectives.md` | Reference for every objective type: fields, defaults, icons, matching rules. **Update it (and the README table) in the same change whenever a type is added or edited.** |
 | `scripts/guidedmissions/netvars.lua` | Every netvar name plus the attach/read/write helpers. |
 | `scripts/guidedmissions/settings.lua` | Runtime settings, populated from mod options in `modmain.lua`. |
 | `scripts/widgets/guidedmissiontracker.lua` | Client HUD. Renders the netvar string contract as a mission card (crafting-menu frame, item icons, green checks); no game logic. |
@@ -68,7 +69,11 @@ elevated prompt. It only helps this machine; other players need their own copy.
   .\verify
   ```
 
-  `verify.cmd` at the repo root; it `cd`s to its own directory first, so any working
+  From Git Bash, run it from the repo root as `cmd //c ".\\verify.cmd"` — bash
+  will not execute a `.cmd` directly, and a relative `.\verify.cmd` is resolved
+  against the shell's working directory.
+
+  `verify.cmd` is at the repo root; it `cd`s to its own directory first, so any working
   directory works. Batch runs in place from PowerShell and cmd (no `.sh` file
   association, so no stray Git Bash window). Override the interpreters with
   `LUA=...` / `LUAC=...`. `tests/preview/run.sh` is still POSIX and needs `sh`.
@@ -121,7 +126,7 @@ elevated prompt. It only helps this machine; other players need their own copy.
   sh tests/preview/run.sh
   ```
 
-  Outputs `tests/preview/out/{active_2row,sanity_2row,active_1row,won,done,collapsed}.png`. Requires
+  Outputs `tests/preview/out/{active_2row,sanity_2row,heal_2row,active_1row,won,done,collapsed}.png`. Requires
   Pillow (`pip install pillow`). The game data path defaults to the Steam install and is
   overridable with `--game-data` or `DST_DATA`. Because it records the real widget, layout
   changes show up without duplicating constants. It does not exercise input, netvars, or
@@ -134,8 +139,8 @@ elevated prompt. It only helps this machine; other players need their own copy.
 - Host console: `c_save()` to test `OnSave`/`OnLoad`, `c_reset()` for a fresh world.
 - Mission state is stored on players, so an existing save retains old progress.
   As an admin/host, open the console (`~`) and run `c_resetmissions()` to restart
-  your chain from mission 1, or `c_setmission(n)` (1-based) to jump to any
-  mission, without regenerating the world (`modmain.lua` →
+  your chain from mission 1, or `c_setmission(n)` (1-based) / `c_setmission("id")`
+  to jump to any mission, without regenerating the world (`modmain.lua` →
   `GuidedMissionManager:JumpTo`). Test with two or more players where possible.
 
 ## Troubleshooting (read this before debugging)

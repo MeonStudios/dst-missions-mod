@@ -1,23 +1,36 @@
 -- Mission chain configuration.
 --
 -- Missions run in order. Each player progresses independently. Edit this file
--- to build your own guided playthrough; see CLAUDE.md for the full schema.
+-- to build your own guided playthrough; see docs/objectives.md for the full schema.
 --
--- Objective types:
---   collect: prefab, count  -> acquire `count` of `prefab` (starting inventory counts)
---   craft:   prefab, count  -> craft `count` of `prefab` into the inventory
---   build:   prefab, count  -> build `count` of a structure `prefab` in the world
---   kill:    prefab, count  -> kill `count` of `prefab`
---   survive: day            -> reach this absolute world day
+-- Objective types (full reference: docs/objectives.md):
+--   collect:      prefab, count              -> hold `count` of `prefab` (peak holdings)
+--   craft:        prefab, count              -> craft `count` inventory items
+--   build:        prefab, count              -> place `count` structures
+--   kill:         prefab, count              -> kill `count` of `prefab`
+--   survive:      day                        -> reach this absolute world day
+--   chop:         count                      -> fell `count` trees
+--   mine:         count                      -> finish mining `count` nodes
+--   eat:          prefab, count              -> eat `count` of `prefab`
+--   heal:         count                      -> restore `count` health points
+--   sanity:       count                      -> restore `count` sanity points
+--   pick:         prefab, count              -> pick `count` plants
+--   collect_food: count, foodtype?,          -> hold `count` edible items
+--                 secondaryfoodtype?
+--   cook:         count, prefab?             -> cook `count` items on a fire
+--   cookpot:      count, prefab?             -> start `count` Crock Pot dishes
+--   prototype:    count, prefab?             -> learn `count` new recipes (prefab = recipe id)
+--   `label` is required on every objective; `icon` only where the type lists it.
 --
 -- `craft` and `build` listen to different engine events: `builditem` fires for
 -- products that can sit in the inventory (torch, spear); `buildstructure` fires
 -- for things placed in the world (firepit, researchlab). Use the wrong type for
 -- a prefab and that objective will never complete.
 --
--- `label` is optional and carries no count: the tracker renders the counter
--- separately (for example "Collect logs" with "0/10" beside it). `subtext` is
--- required: one flavour line, 45 characters max, shown under the objectives.
+-- `label` is required and carries no count: the tracker renders the counter
+-- separately (for example "Collect logs" with "0/10" beside it). `title` and
+-- `subtext` are required too: `subtext` is one flavour line, 45 characters max,
+-- shown under the objectives.
 --
 -- Missions are informational only: completing one gives no items or other
 -- in-game benefit.
@@ -38,8 +51,8 @@ return {
         title = "Tools of the Trade",
         subtext = "Your hands weren't built for chopping trees.",
         objectives = {
-            { type = "craft", prefab = "axe", count = 1, label = "Craft an axe" },
             { type = "craft", prefab = "pickaxe", count = 1, label = "Craft a pickaxe" },
+            { type = "craft", prefab = "axe", count = 1, label = "Craft an axe" },
         },
     },
     {
@@ -57,16 +70,17 @@ return {
         subtext = "The dark is not your friend. Probably.",
         objectives = {
             { type = "craft", prefab = "torch", count = 1, label = "Craft a torch" },
+            { type = "build", prefab = "campfire", count = 1, label = "Build a campfire" },
             { type = "survive", day = 2, label = "Survive the first night" },
         },
     },
     {
         id = "eat_food",
         title = "Food for Thought",
-        subtext = "What came first, the chicken or the egg?",
+        subtext = "Veggies: now with 100% more fire.",
         objectives = {
             { type = "collect_food", foodtype = "VEGGIE", count = 5, label = "Collect veggies" },
-            { type = "cook", count = 2, label = "Cook 2 items" },
+            { type = "cook", count = 2, label = "Cook items" },
         },
     },
     {
@@ -84,16 +98,16 @@ return {
         subtext = "It's strange enough. Don't make it worse.",
         objectives = {
             { type = "pick", prefab = "flower", count = 3, label = "Pick flowers" },
-            { type = "sanity", count = 15, label = "Restore sanity", icon = "brain" },
+            { type = "sanity", count = 15, label = "Restore sanity" },
         },
     },
     {
         id = "collect_rocks",
-        title = "Hitting Rock Bottom",
-        subtext = "Gold will improve the mood.",
+        title = "Rock Solid Plan",
+        subtext = "Hit things until they become useful.",
         objectives = {
             { type = "mine", count = 3, label = "Mine boulders" },
-            { type = "collect", prefab = "goldnugget", count = 2, label = "Collect gold nuggets" },
+            { type = "collect", prefab = "goldnugget", count = 1, label = "Collect a gold nugget" },
         },
     },
     {
@@ -124,13 +138,65 @@ return {
         },
     },
     {
-        id = "food_making",
+        id = "backpack",
+        title = "Carry On",
+        subtext = "Room for everything but your problems.",
+        objectives = {
+            { type = "craft", prefab = "backpack", count = 1, label = "Craft a Backpack" },
+        },
+    },
+    {
+        id = "food_build",
         title = "The Kitchen Experiment",
-        subtext = "Cooking: art, or just less raw meat.",
+        subtext = "A pot, a rack, and questionable recipes.",
         objectives = {
             { type = "build", prefab = "cookpot", count = 1, label = "Build a Crock Pot" },
             { type = "build", prefab = "meatrack", count = 1, label = "Build a Drying Rack" },
             { type = "cookpot", count = 1, label = "Cook a meal in a Crock Pot" },
+        },
+    },
+    {
+        id = "find_meat",
+        title = "Where's the Beef?",
+        subtext = "Something out there must be edible.",
+        objectives = {
+            { type = "collect_food", foodtype = "MEAT", count = 2, label = "Collect meat" },
+        },
+    },
+    {
+        id = "make_meatballs",
+        title = "Juicy Meatballs",
+        subtext = "Meat plus three fillers. Hide the evidence.",
+        objectives = {
+            { type = "cookpot", prefab = "meatballs", count = 1, label = "Cook meatballs" },
+        },
+    },
+    {
+        id = "green_thumb",
+        title = "Green Thumb",
+        subtext = "Dirt, seeds, patience. Mostly patience.",
+        objectives = {
+            { type = "craft", prefab = "farm_plow_item", count = 1, label = "Craft a Garden Digamajig" },
+            { type = "craft", prefab = "farm_hoe", count = 1, label = "Craft a Garden Hoe" },
+            { type = "plant", count = 4, label = "Plant seeds" },
+        },
+    },
+    {
+        id = "level_up",
+        title = "Science 2.0",
+        subtext = "The first machine was just a warm-up.",
+        objectives = {
+            { type = "build", prefab = "researchlab2", count = 1, label = "Build an Alchemy Engine" },
+            { type = "prototype", count = 1, label = "Prototype a recipe" },
+        },
+    },
+    {
+        id = "warm_thoughts",
+        title = "Warm Thoughts",
+        subtext = "Hot rocks: the best winter pocket warmers.",
+        objectives = {
+            { type = "craft", prefab = "heatrock", count = 1, label = "Craft a Thermal Stone" },
+            { type = "collect", prefab = "smallmeat_dried", count = 2, label = "Dry meat into jerky"},
         },
     },
     {

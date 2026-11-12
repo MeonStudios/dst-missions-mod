@@ -42,12 +42,17 @@ Supported objective types:
 | `sanity`  | `count`           | the player restores `count` sanity (any source, including overflow at full sanity) |
 | `mine`    | `count`           | the player finishes mining `count` nodes with a pickaxe |
 | `pick`    | `prefab`, `count` | the player picks `count` of the plant prefab |
+| `plant`   | `count`, optional `prefab` (a seed) | the player plants `count` seeds in tilled farm soil |
 | `collect_food` | `count`, optional `foodtype`/`secondaryfoodtype` | the player has held `count` edible items (peak holdings, like `collect`) |
 | `cook`    | `count`, optional `prefab` | the player cooks `count` food items on a fire |
 | `cookpot` | `count`, optional `prefab` | the player starts cooking `count` dishes in a Crock Pot (optional dish filter) |
-| `prototype` | `count`, optional `recipe` | the player learns `count` new recipes (station prototyping or blueprints) |
+| `prototype` | `count`, optional `prefab` (a recipe id) | the player learns `count` new recipes (station prototyping or blueprints) |
 
-`label` is optional. `collect` reads the player's inventory, so the starting
+The full reference — every field, default icon, and matching rule — is in
+[`docs/objectives.md`](docs/objectives.md).
+
+`title` and `label` are required on every mission and objective. `collect` reads the
+player's inventory, so the starting
 inventory counts and stacked pickups register; the progress is peak holdings, so
 spending or dropping items later does not remove credit. `craft` and `build` are
 deliberately separate: torches, spears, and other carryable products are `craft`;
@@ -73,15 +78,16 @@ source. Induced insanity or lunacy does not hide progress: the mod reads the req
 delta rather than the bar, which those effects force to 0 or full.
 `mine` credits a completed `MINE` work action, so any pickaxe-mined node counts — boulders,
 salt/moon rocks, marble and petrified trees — while partial swings and chopping/digging do
-not. `pick` matches the picked plant's prefab; for flowers use `prefab = "flower"`. Picking a
+not. `chop` rows draw the axe icon and `mine` rows the pickaxe icon by default; set the
+optional `icon` field to override either. `pick` matches the picked plant's prefab; for flowers use `prefab = "flower"`. Picking a
 normal flower restores 5 sanity as part of the pick (`prefabs/flower.lua:57`), while eating
 the petals restores only 1 health and no sanity — so a "pick flowers to restore sanity"
 mission should use `pick`, not `eat` on the petals. A `pick` row for `flower` draws the
 world flower's own animation (the same art the player sees in the world; flowers have no
 inventory icon). Other plants have no built-in icon, so set the optional `icon` field to
-an item id (e.g. `icon = "berries"`) if you want one on the row. `icon = "brain"` on a
-`sanity` row draws the HUD's sanity brain (the same art as the status badge); without it
-the row is text-only.
+an item id (e.g. `icon = "berries"`) if you want one on the row. A `sanity` row draws the
+HUD's sanity brain by default (the same art as the status badge); set `icon` only to
+replace it.
 
 `collect_food` counts any carried item with an `edible` component — raw or cooked — using
 the same peak-holdings rule as `collect`. It accepts an optional food-type filter. Food
@@ -111,15 +117,16 @@ crafting station for the first time and learning from blueprints, recipe scanner
 similar teachers. Each recipe counts once; recipes the player already knew when the tracker
 started are seeded from the builder and never count, and vanilla's repeated unlock events
 for placing an already-known structure do not inflate the counter. The row uses the
-blueprint item's icon by default; a targeted `recipe` shows that product's icon instead,
-and an explicit `icon` field overrides either. The optional `recipe` field targets one
-recipe id (e.g. `recipe = "goldenaxe"`). Because pre-learned recipes do not
+blueprint item's icon by default; a targeted `prefab` shows that product's icon instead,
+and an explicit `icon` field overrides either. The optional `prefab` field holds a recipe
+id — recipe ids are product prefab ids — and targets one recipe (e.g.
+`prefab = "goldenaxe"`). Because pre-learned recipes do not
 count, a prototype mission placed late in the chain needs recipes the player has not learned
 yet — `c_resetmissions()` does not forget recipes.
 
 Important: **no-tech recipes never fire this event.** Axe, pickaxe, torch, campfire and
 other `TECH.NONE` recipes are considered known from the start, so building one for the
-first time does not count as a prototype (and `prototype` with `recipe = "axe"` would never
+first time does not count as a prototype (and `prefab = "axe"` would never
 complete). Use `craft` for those, e.g. `{ type = "craft", prefab = "axe", count = 1 }`.
 
 ## Retest with admin commands
@@ -131,6 +138,9 @@ and run:
 - `c_setmission(n)` — jump straight to mission `n` (1-based, in the order missions
   appear in `missions.lua`), e.g. `c_setmission(5)`. One past the last mission shows
   the completion state.
+- `c_setmission("mission_id")` — jump to a mission by its stable `id`, e.g.
+  `c_setmission("green_thumb")`. Quote the id; it is the lowercase `id` field in
+  `missions.lua`, and it does not change when missions are reordered.
 
 Both names autocomplete in the console. An in-game admin's console defaults to
 **Remote** execution (toggle with Ctrl), which runs the command on the server where
@@ -166,9 +176,9 @@ items.
 ## Known limitations
 
 - Progress is per player; there is no shared or team mission state.
-- `collect` is polled from the inventory once a second and only counts the player's
-  inventory and backpack, not chests; items crafted and consumed within the same
-  second may not be counted.
+- `collect` rereads the inventory one tick after an inventory event and only counts the
+  player's inventory, equipped items, cursor item, and worn backpack — not chests. An
+  item gained and spent before that reread runs can be missed.
 - The tracker is text-only with a fixed layout; long objective lists can overflow.
 - Completion is announced globally, with no per-player popup.
 - No localization, no custom icons, no mission editor UI.
