@@ -40,4 +40,15 @@ configuration_options = {
         },
         default = true,
     },
+    {
+        name = "EMERGENCY_FREQUENCY",
+        label = "Emergency Repeat",
+        hover = "How often an emergency mission may trigger for the same player.",
+        options = {
+            { description = "Every time", data = "always" },
+            { description = "Once per session", data = "session" },
+            { description = "Once per server", data = "server" },
+        },
+        default = "session",
+    },
 }

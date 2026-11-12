@@ -61,6 +61,7 @@ UICOLOURS = {
     IVORY = rgb(236, 232, 223),
     IVORY_70 = rgb(165, 162, 156),
     GOLD_UNIMPORTANT = rgb(213, 213, 203),
+    RED = rgb(207, 61, 61),
 }
 
 BROWN = { 97 / 255, 73 / 255, 46 / 255, 1 }
@@ -171,9 +172,15 @@ function Widget:CancelMoveTo() end
 function Widget:CancelScaleTo() end
 function Widget:CancelTintTo() end
 
-function Widget:MoveTo(from, to)
+function Widget:MoveTo(from, to, seconds, fn)
     self:SetPosition(to)
     self.shown = true
+    -- The real engine runs this after the slide. Resolve it immediately so a
+    -- preview captures the post-transition content (the tracker swaps the
+    -- payload in the callback).
+    if fn ~= nil then
+        fn()
+    end
 end
 
 function Widget:IsVisible()
@@ -659,6 +666,18 @@ local CASES = {
                 ROW("Restore health", "heart", "0/10"),
             }, ";"),
             state = "active",
+        },
+    },
+    {
+        "emergency_2row",
+        {
+            title = "Bleeding Out",
+            subtext = "Patch yourself up before something finishes the job.",
+            rows = table.concat({
+                ROW("Get back to 75% health", "heart", "40/75%"),
+                ROW("Eat a butterfly wing", "butterflywings", "0/1", false, true),
+            }, ";"),
+            state = "emergency",
         },
     },
     {

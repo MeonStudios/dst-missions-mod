@@ -1,6 +1,8 @@
 -- See netvars.lua: require()d modules cannot see modmain's `GLOBAL` binding.
 local GLOBAL = _G
 
+local Conditions = require("guidedmissions/conditions")
+
 local Objectives = {}
 
 function Objectives.GetCurrentDay()
@@ -33,6 +35,19 @@ function Objectives.GetCounter(objective, progress)
         return string.format("Day %d/%d", Objectives.GetCurrentDay(), target)
     end
 
+    if objective.type == "reach_stat" then
+        -- A live percentage, not a count: "40/75%". Only the target carries the
+        -- unit, matching the "current/target" style of every other counter. The
+        -- tracker replaces the counter with a checkmark once the threshold is
+        -- met.
+        local _, target = Conditions.ParseThreshold(objective.threshold)
+        if target == nil then
+            return ""
+        end
+        local value = math.floor(tonumber(progress) or 0)
+        return string.format("%d/%d%%", value, target)
+    end
+
     local target = tonumber(objective.count) or 1
     -- Heal progress is fractional when health comes back over time; show whole
     -- points. `%d` would truncate anyway, but this makes it explicit.
@@ -43,6 +58,16 @@ end
 -- The prefab whose inventory icon illustrates this objective, or nil when the
 -- objective has no item icon (survive rows render text-only).
 function Objectives.GetIconPrefab(objective)
+    if objective.type == "reach_stat" then
+        -- The same HUD badge glyphs the heal/sanity rows use, chosen by stat.
+        return objective.icon
+            or (objective.stat == "health" and "heart" or "brain")
+    end
+    if objective.type == "sleep" then
+        -- Tents and bedrolls are world/inventory objects without a useful row
+        -- icon here; the row is deliberately text-only (`icon` is ignored).
+        return nil
+    end
     if objective.type == "chop" then
         -- A chop objective has no prefab of its own: trees are matched by tag,
         -- not id. The default shows the axe that does the chopping; `icon` lets
@@ -110,6 +135,14 @@ function Objectives.IsComplete(objective, progress)
         return Objectives.GetCurrentDay() >= (tonumber(objective.day) or 1)
     end
 
+    if objective.type == "reach_stat" then
+        local operator, target = Conditions.ParseThreshold(objective.threshold)
+        if operator == nil then
+            return false
+        end
+        return Conditions.Matches(operator, tonumber(progress) or 0, target)
+    end
+
     local value = tonumber(progress) or 0
     local target = tonumber(objective.count) or 1
     if objective.type == "heal" or objective.type == "sanity" then
@@ -172,12 +205,31 @@ function Objectives.CountFoodInInventory(inst, objective)
     return count
 end
 
+-- The current stat percentage (0-100) for a `reach_stat` row, or nil for any
+-- other type or a missing component. The manager refreshes these on stat events
+-- and once per second, so the row follows the live value rather than an
+-- accumulated one.
+function Objectives.LiveProgress(inst, objective)
+    if objective == nil or objective.type ~= "reach_stat" then
+        return nil
+    end
+    local fraction = Conditions.GetStatFraction(inst, objective.stat)
+    if fraction == nil then
+        return nil
+    end
+    return fraction * 100
+end
+
 function Objectives.InitialProgress(inst, objective)
     if objective.type == "collect" then
         return Objectives.CountInInventory(inst, objective.prefab)
     end
     if objective.type == "collect_food" then
         return Objectives.CountFoodInInventory(inst, objective)
+    end
+    local live = Objectives.LiveProgress(inst, objective)
+    if live ~= nil then
+        return live
     end
     return 0
 end
@@ -201,6 +253,11 @@ function Objectives.ReconcileProgress(inst, objective, progress)
     end
     if objective.type == "collect_food" then
         return math.max(value, Objectives.CountFoodInInventory(inst, objective))
+    end
+    -- reach_stat mirrors the live stat, so it may fall as well as rise.
+    local live = Objectives.LiveProgress(inst, objective)
+    if live ~= nil then
+        return live
     end
     return value
 end
@@ -400,6 +457,15 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
                 end
             end
         end
+    elseif event == "guidedmissions_slept" then
+        -- Pushed by modmain's `sleepingbaguser` post-init when the player enters
+        -- a tent/bedroll. `bed` is the bed entity; `prefab` filters its kind
+        -- (`tent`, `siestahut`, a bedroll), and no filter accepts any bed.
+        if objective.type == "sleep"
+            and (objective.prefab == nil
+                or (data.bed ~= nil and data.bed.prefab == objective.prefab)) then
+            return 1
+        end
     end
 
     return 0
@@ -427,6 +493,8 @@ Objectives.VALID_TYPES = {
     cookpot = true,
     prototype = true,
     trap_catch = true,
+    sleep = true,
+    reach_stat = true,
 }
 
 return Objectives

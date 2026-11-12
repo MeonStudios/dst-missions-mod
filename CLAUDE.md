@@ -10,12 +10,15 @@ Lua 5.1/LuaJIT semantics. No build step: this directory *is* the mod folder.
 | File | Role |
 |---|---|
 | `scripts/guidedmissions/missions.lua` | The mission chain. Normally the only file you edit; the objective schema and every option are in `docs/objectives.md`. |
-| `scripts/guidedmissions/manager.lua` | Server state machine, event listeners, `OnSave`/`OnLoad`. |
+| `scripts/guidedmissions/emergencies.lua` | Emergency pop-up missions. Separate from the ordered chain; the schema is in `docs/emergencies.md`. |
+| `scripts/guidedmissions/conditions.lua` | Shared stat reads and threshold-string parsing for emergency conditions and `reach_stat` rows. |
+| `scripts/guidedmissions/manager.lua` | Server state machine, event listeners, emergency overlay, `OnSave`/`OnLoad`. |
 | `scripts/guidedmissions/objectives.lua` | Objective labels, progress, matching, completion. |
 | `docs/objectives.md` | Reference for every objective type: fields, defaults, icons, matching rules. **Update it (and the README table) in the same change whenever a type is added or edited.** |
+| `docs/emergencies.md` | Reference for emergency missions: trigger/resolve conditions, optional objectives, repeat modes. |
 | `scripts/guidedmissions/netvars.lua` | Every netvar name plus the attach/read/write helpers. |
 | `scripts/guidedmissions/settings.lua` | Runtime settings, populated from mod options in `modmain.lua`. |
-| `scripts/widgets/guidedmissiontracker.lua` | Client HUD. Renders the netvar string contract as a mission card (crafting-menu frame, item icons, green checks); no game logic. |
+| `scripts/widgets/guidedmissiontracker.lua` | Client HUD. Renders the netvar string contract as a mission card (crafting-menu frame, item icons, green checks; `emergency` state forces the card open with a red title); no game logic. |
 | `tests/manager_test.lua` | Plain-Lua logic harness for the server manager. Stubs DST globals and replays the full chain; never loaded by the game. |
 | `tests/modmain_test.lua` | Loads the real `modmain.lua` in a sandbox matching DST's mod env (notably **no `tonumber`**) and drives the console commands / RPC handlers. Never loaded by the game. |
 | `tests/preview/` | Offline HUD preview: runs the real tracker with stubbed widgets and renders PNGs from the game's atlases/fonts. |
@@ -126,7 +129,7 @@ elevated prompt. It only helps this machine; other players need their own copy.
   sh tests/preview/run.sh
   ```
 
-  Outputs `tests/preview/out/{active_2row,hint_2row,hint_open,trap_1row,optional_3row,sanity_2row,heal_2row,active_1row,won,done,collapsed}.png`. Requires
+  Outputs `tests/preview/out/{active_2row,hint_2row,hint_open,trap_1row,optional_3row,sanity_2row,heal_2row,emergency_2row,active_1row,won,done,collapsed}.png`. Requires
   Pillow (`pip install pillow`). The game data path defaults to the Steam install and is
   overridable with `--game-data` or `DST_DATA`. Because it records the real widget, layout
   changes show up without duplicating constants. It does not exercise input, netvars, or

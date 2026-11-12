@@ -728,6 +728,15 @@ end
 
 function MissionTracker:SetContent(state, rows)
     local hint = state.hint or ""
+    local emergency = state.state == "emergency"
+
+    -- An emergency borrows the same card but tints the title red, so the pop-up
+    -- reads differently from a normal mission at a glance. The divider stays
+    -- the normal brown.
+    local title_colour = emergency and UICOLOURS.RED or UICOLOURS.HIGHLIGHT_GOLD
+    self.card_title:SetColour(title_colour)
+    self.strip_title:SetColour(title_colour)
+    self.card_divider:SetTint(unpack(BROWN))
 
     -- The "?" sits immediately after the title, so measure the rendered title
     -- first. ResetRegionSize makes GetRegionSize return the text extent rather
@@ -875,7 +884,27 @@ function MissionTracker:Refresh()
         return
     end
 
+    -- "emergency": a pop-up replacing the chain card. The first appearance (or
+    -- a return from a chain mission) force-opens the card and slides it in;
+    -- objective progress after that renders in place.
+    if new_state == "emergency" then
+        if previous == "emergency" then
+            self:SetContent(state, rows)
+            self:ApplyExpandedPosition()
+        else
+            self:Transition(function()
+                self:SetContent(state, rows)
+            end)
+        end
+        return
+    end
+
     if new_state == "won" then
+        -- A recovered emergency must be visible even if the tracker was
+        -- collapsed when the emergency started.
+        if previous == "emergency" then
+            self.expanded = true
+        end
         if previous ~= "won" then
             self:PlaySting()
         end
@@ -885,9 +914,10 @@ function MissionTracker:Refresh()
     end
 
     -- "active": a mission in progress. A payload arriving straight after a
-    -- completion is the next mission, so slide the old card away and the new
-    -- one in. Anything else renders in place.
-    if previous == "won" then
+    -- completion, or after an emergency resolves, is the next/restored mission,
+    -- so slide the old card away and the new one in. Anything else renders in
+    -- place.
+    if previous == "won" or previous == "emergency" then
         self:Transition(function()
             self:SetContent(state, rows)
         end)

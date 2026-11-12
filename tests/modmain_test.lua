@@ -72,8 +72,16 @@ local function RecordPrint(...)
     console_output[#console_output + 1] = table.concat(parts, " ")
 end
 
+-- Mod options the harness feed to modmain. The dropdown default is "session";
+-- the harness deliberately asks for "always" so the mapping is observable.
+local config_values = {
+    SHOW_TRACKER = true,
+    ANNOUNCE_MISSIONS = true,
+    EMERGENCY_FREQUENCY = "always",
+}
+
 local function ModAPI(env)
-    env.GetModConfigData = function() return true end
+    env.GetModConfigData = function(name) return config_values[name] end
     env.AddModRPCHandler = function(namespace, name, fn)
         rpc_handlers[namespace .. "/" .. name] = fn
     end
@@ -147,6 +155,10 @@ local chunk = assert(loadfile(root .. "/modmain.lua"))
 setfenv(chunk, env)
 local ok, err = pcall(chunk)
 Check("modmain loads in the sandbox", ok, err)
+
+local Settings = require("guidedmissions/settings")
+Check("emergency frequency comes from the mod config",
+    Settings.emergency_frequency == "always", Settings.emergency_frequency)
 
 Check("c_setmission is a console global", type(_G.c_setmission) == "function")
 Check("c_resetmissions is a console global", type(_G.c_resetmissions) == "function")
@@ -422,6 +434,37 @@ if type(trap_postinit) == "function" then
     Check("trap check without a doer is safe", tool:Harvest() == nil)
 end
 
+-- ---- sleepingbaguser post-init -------------------------------------------
+-- Entering a tent emits no vanilla player event. The sleep action calls
+-- SleepingBag:DoSleep(doer), which reaches the player's sleepingbaguser
+-- component; modmain reports the bed entity to the player so a sleep objective
+-- can count entries.
+
+local sleeper_postinit = component_postinits.sleepingbaguser
+Check("sleepingbaguser post-init registered", type(sleeper_postinit) == "function")
+
+if type(sleeper_postinit) == "function" then
+    local player = NewChef()
+    local component = { inst = player }
+    function component:DoSleep(bed)
+        self.slept_in = bed
+    end
+    sleeper_postinit(component)
+
+    local bed = { prefab = "tent" }
+    component:DoSleep(bed)
+    Check("sleep hook forwards the bed to vanilla", component.slept_in == bed)
+    Check("sleep hook reports the bed to the player",
+        #player.events == 1
+            and player.events[1].name == "guidedmissions_slept"
+            and player.events[1].data.bed == bed)
+
+    -- No bed (or no player) must not report anything or error.
+    local before = #player.events
+    component:DoSleep(nil)
+    Check("sleep hook ignores a nil bed", #player.events == before)
+end
+
 -- ---- fake players ---------------------------------------------------------
 
 local jumps = {}
@@ -566,6 +609,17 @@ if type(reset_handler) == "function" then
     Run(reset_handler, server_player)
 end
 Check("resetmissions RPC handler applies an admin reset", LastJump() == 1, LastJump())
+
+-- ---- unknown mod option values -------------------------------------------
+-- An old or malformed config must not disable emergencies: modmain sanitises
+-- the value back to the default ("session").
+
+config_values.EMERGENCY_FREQUENCY = "nonsense"
+local reloaded = assert(loadfile(root .. "/modmain.lua"))
+setfenv(reloaded, env)
+Check("modmain reloads with an unknown frequency", pcall(reloaded))
+Check("unknown emergency frequency falls back to session",
+    Settings.emergency_frequency == "session", Settings.emergency_frequency)
 
 print(failures == 0 and "ALL PASS" or ("FAILURES: " .. failures))
 os.exit(failures == 0 and 0 or 1)

@@ -239,6 +239,15 @@ documented and version-dependent.
     Be aware `Sanity:LongUpdate` calls `DoDelta(self.rate * dt, true)` every tick
     (`components/sanity.lua:609`), so positive auras/rates push continuous small
     `sanitydelta` events, including at full sanity.
+  - **Threshold reads:** read the raw component fields, never `GetPercent()`:
+    `health.currenthealth / health.maxhealth` and `sanity.current / sanity.max` (all
+    plain numbers). `Health:IsDead()` is `currenthealth <= 0`
+    (`components/health.lua:546-548`); use it to skip dead/ghost players.
+    `Health:SetPercent(percent)` is `components/health.lua:550-553` and
+    `Sanity:SetPercent(percent)` is `components/sanity.lua:302-306`. The debug commands
+    `c_sethealth(n)` / `c_setsanity(n)` (`consolecommands.lua:388-393` / `:404-409`)
+    clamp to 1, skip ghosts, and call `SetPercent`, so they are a convenient in-game
+    trigger test.
   - `picksomething` → `{ object = <plant>, loot = <entity or list> }`, pushed on the
     **picker** by `Pickable:SpawnProductLoot` (`components/pickable.lua:481,505`) when
     the picker has an inventory and the pick produced loot. It does not fire on the
@@ -383,6 +392,26 @@ documented and version-dependent.
   to the checker with `{ loot = <lootprefabs> }`. Objective filters match **loot
   ids**, not the creature: rabbits store `{ "rabbit" }`, while spiders/frogs store
   their drops.
+
+## Sleeping (tents, siesta huts, bedrolls)
+
+- **Entering a bed emits no player event.** `ACTIONS.SLEEPIN.fn`
+  (`scripts/actions.lua:2699-2710`) resolves the bed (a target tent or a held
+  bedroll) and calls `bag.components.sleepingbag:DoSleep(act.doer)`.
+- **`SleepingBag:DoSleep(doer)`** (`components/sleepingbag.lua:61-73`) does nothing
+  unless the bed is free and the player is not already in one; otherwise it sets
+  `self.sleeper` / `doer.sleepingbag` and calls
+  `doer.components.sleepingbaguser:DoSleep(self.inst)` (`:66`). That call is the
+  exact moment the player enters.
+- **`SleepingBagUser:DoSleep(bed)`** (`components/sleepingbaguser.lua:40-51`) records
+  `self.bed` and starts the sleep tick task. The component is added to players in
+  `prefabs/player_common.lua:2829`, inside the server-only component block; the
+  client player is `player_classified` and has no `sleepingbaguser`.
+- **Consequence for this mod:** `modmain.lua`'s `sleepingbaguser` post-init wraps
+  `DoSleep`, calls vanilla, then pushes `guidedmissions_slept` on the player with
+  `{ bed = <the bed entity> }`. Because the bed only reaches this call after its
+  checks, the event fires exactly once per entry, not on wake-up. `bed.prefab` is
+  `tent`, `siestahut`, or a `bedroll_*` prefab.
 
 ## Recipe prototyping
 
@@ -823,7 +852,11 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
 - `UICOLOURS` entries are `RGB()` tables of four 0-1 floats
   (`constants.lua:2326`, `RGB` at `:1662` returns `{r/255, g/255, b/255, 1}`), so they
   can be passed straight to `Text(font, size, text, colour)` and
-  `Image:SetTint(unpack(UICOLOURS.X))`.
+  `Image:SetTint(unpack(UICOLOURS.X))`. Entries include `HIGHLIGHT_GOLD`,
+  `GOLD_UNIMPORTANT`, `IVORY`, `IVORY_70` and `RED` (`RGB(207, 61, 61, 1)`,
+  `constants.lua:2344`). `Text:SetColour` accepts either the table or RGBA numbers
+  (`widgets/text.lua:56-59`), so a state-driven tint is
+  `title:SetColour(UICOLOURS.RED)`.
 - Resizable frames do exist if the crafting frame is too rigid: `NineSlice`
   (`widgets/nineslice.lua:52`, ten texture names, `SetSize`) and engine `Panel`
   (`widgets/panel.lua:10`, one texture + pixel borders). The engine one is the cleaner
@@ -893,7 +926,8 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
   `data/images/`.
 - Colour tables worth reusing (`scripts/constants.lua`): bare globals `BROWN`
   `{97,73,46}` (`:2321`), `GOLD`, `BLACK`, `DARKGREY`; and `UICOLOURS` (`:2326`) with
-  `HIGHLIGHT_GOLD`, `GOLD_FOCUS`, `BROWN_MEDIUM`, `BROWN_DARK`, `IVORY`, `IVORY_70`.
+  `HIGHLIGHT_GOLD`, `GOLD_FOCUS`, `BROWN_MEDIUM`, `BROWN_DARK`, `IVORY`, `IVORY_70`,
+  `RED` (`RGB(207,61,61,1)`, `:2344`).
   The HUD signals "unavailable" with a light red (`widgets/ingredientui.lua:55`) and
   otherwise uses texture swaps/alpha rather than colour; **green is not used for
   positive state**.

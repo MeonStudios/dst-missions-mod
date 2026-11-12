@@ -18,6 +18,16 @@ Assets = {
 Settings.show_tracker = GetModConfigData("SHOW_TRACKER") ~= false
 Settings.announce_missions = GetModConfigData("ANNOUNCE_MISSIONS") ~= false
 
+-- Emergency repeat mode. Unknown values fall back to the default so an old or
+-- malformed config cannot disable the feature.
+local emergency_frequency = GetModConfigData("EMERGENCY_FREQUENCY")
+if emergency_frequency ~= "always"
+    and emergency_frequency ~= "session"
+    and emergency_frequency ~= "server" then
+    emergency_frequency = "session"
+end
+Settings.emergency_frequency = emergency_frequency
+
 -- Admin testing commands, callable from the debug console (`~`):
 --   c_resetmissions()   restart your chain from mission 1
 --   c_setmission(n)     jump to mission n (1-based, order of missions.lua)
@@ -209,6 +219,23 @@ AddComponentPostInit("trap", function(self)
             doer:PushEvent("guidedmissions_trapchecked", { loot = loot })
         end
         return result
+    end
+end)
+
+-- Entering a tent/bedroll emits no player event. The SLEEPIN action calls
+-- `SleepingBag:DoSleep(doer)` (`components/sleepingbag.lua:61-73`), which hands
+-- control to the player's `sleepingbaguser` component
+-- (`components/sleepingbaguser.lua:40-55`). The bed only calls it after its
+-- free-bed / not-already-sleeping checks, so this fires exactly once per entry,
+-- when the player gets in (not when they wake). `bed` is the bed entity, whose
+-- prefab distinguishes a tent, a siesta hut and a bedroll.
+AddComponentPostInit("sleepingbaguser", function(self)
+    local _DoSleep = self.DoSleep
+    self.DoSleep = function(component, bed)
+        _DoSleep(component, bed)
+        if bed ~= nil and component.inst ~= nil and component.inst.PushEvent ~= nil then
+            component.inst:PushEvent("guidedmissions_slept", { bed = bed })
+        end
     end
 end)
 

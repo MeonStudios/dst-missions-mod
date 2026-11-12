@@ -2,6 +2,7 @@
 local GLOBAL = _G
 
 local Missions = require("guidedmissions/missions")
+local Emergencies = require("guidedmissions/emergencies")
 local Objectives = require("guidedmissions/objectives")
 local Netvars = require("guidedmissions/netvars")
 local Settings = require("guidedmissions/settings")
@@ -79,6 +80,17 @@ local GuidedMissionManager = Class(function(self, inst)
     -- Last world day the survive counter was synced for (see OnPoll).
     self.last_poll_day = nil
 
+    -- Emergency overlay. While `emergency` is set it is the visible mission and
+    -- the chain mission waits in `suspended_mission`/`suspended_progress`.
+    -- `fired_emergencies` remembers triggered ids; whether it survives a load
+    -- depends on Settings.emergency_frequency (see OnSave/OnLoad).
+    self.emergency = nil
+    self.suspended_mission = nil
+    self.suspended_progress = nil
+    self.fired_emergencies = {}
+    -- Pending 3-second recovered-card hold (see ResolveEmergency).
+    self.emergency_hold_task = nil
+
     -- Inventory-derived objectives (collect, collect_food) are reread from the
     -- inventory, never accumulated from events -- but an event is still what
     -- triggers the reread. These four cover every way an item joins the
@@ -120,11 +132,15 @@ local GuidedMissionManager = Class(function(self, inst)
     inst:ListenForEvent("picksomething", function(_, data)
         self:OnObjectiveEvent("picksomething", data)
     end)
+    -- Stat events drive emergency triggering/resolution immediately; the poll
+    -- is the fallback for changes that push no event (loads, console sets).
     inst:ListenForEvent("healthdelta", function(_, data)
         self:OnObjectiveEvent("healthdelta", data)
+        self:CheckEmergencies()
     end)
     inst:ListenForEvent("sanitydelta", function(_, data)
         self:OnObjectiveEvent("sanitydelta", data)
+        self:CheckEmergencies()
     end)
     inst:ListenForEvent("guidedmissions_cookedfood", function(_, data)
         self:OnObjectiveEvent("guidedmissions_cookedfood", data)
@@ -134,6 +150,11 @@ local GuidedMissionManager = Class(function(self, inst)
     end)
     inst:ListenForEvent("guidedmissions_plantedseed", function(_, data)
         self:OnObjectiveEvent("guidedmissions_plantedseed", data)
+    end)
+    -- Pushed by modmain's `sleepingbaguser` post-init when the player enters a
+    -- tent/bedroll (`data.bed` is the bed entity).
+    inst:ListenForEvent("guidedmissions_slept", function(_, data)
+        self:OnObjectiveEvent("guidedmissions_slept", data)
     end)
     -- Pushed by modmain's `trap` post-init when the player checks a sprung trap
     -- that holds a catch (`data.loot` is the trap's loot prefab list).
@@ -202,10 +223,16 @@ function GuidedMissionManager:Begin()
             self.mission_index = #Missions + 1
         end
         self:Sync()
+        self:RefreshLiveObjectives()
+        -- A player who loads in below an emergency threshold should see the
+        -- pop-up immediately rather than wait for the next poll.
+        self:CheckEmergencies()
         return
     end
 
     self:SetMission(1)
+    self:RefreshLiveObjectives()
+    self:CheckEmergencies()
 end
 
 -- Jump targets can be a 1-based mission number (2 or "2") or a stable mission
@@ -245,6 +272,10 @@ function GuidedMissionManager:JumpTo(target)
     -- objectives from counting recipes the player already knew.
     self:SnapshotKnownRecipes()
 
+    -- Drop any emergency overlay or recovered-card hold: the jump replaces the
+    -- visible mission, including the one the emergency paused.
+    self:ClearEmergency()
+
     if self.begin_task ~= nil then
         self.begin_task:Cancel()
         self.begin_task = nil
@@ -263,6 +294,8 @@ function GuidedMissionManager:JumpTo(target)
 end
 
 function GuidedMissionManager:Reset()
+    -- A reset is also the admin's way to re-arm emergencies for another test.
+    self.fired_emergencies = {}
     self:JumpTo(1)
 end
 
@@ -323,6 +356,10 @@ function GuidedMissionManager:OnObjectiveEvent(event, data)
             self:Sync()
         end
     end
+
+    -- `reach_stat` rows are not accumulated from the event; they mirror the
+    -- current stat, including when the event added no increment.
+    self:RefreshLiveObjectives()
 end
 
 -- Defer the reread by a tick: `gotnewitem` is pushed *before* the item is
@@ -365,12 +402,50 @@ function GuidedMissionManager:ReconcileInventory()
     end
 end
 
--- Only `survive` still needs a periodic read. Syncing only when the day
--- changes keeps an idle mission down to one timer wake-up per second.
-function GuidedMissionManager:OnPoll()
-    if self.completed or self.current_mission == nil then
+-- Keep `reach_stat` rows on the live stat. Called from stat events, at Begin,
+-- and once per second; this is why the required goal row on an emergency card
+-- always matches the value that resolves it.
+function GuidedMissionManager:RefreshLiveObjectives()
+    local mission = self.current_mission
+    if mission == nil then
         return
     end
+
+    local changed = false
+    for i, objective in ipairs(mission.objectives or {}) do
+        local value = Objectives.LiveProgress(self.inst, objective)
+        if value ~= nil and value ~= self.progress[i] then
+            self.progress[i] = value
+            changed = true
+        end
+    end
+
+    if changed then
+        self:CheckCompletion()
+        if not self.completed and self.current_mission ~= nil then
+            self:Sync()
+        end
+    end
+end
+
+-- The poll is also the fallback emergency trigger, so it keeps running even
+-- when the active mission has no survive row. The survive read still syncs only
+-- when the world day changes, so an idle mission stays cheap.
+function GuidedMissionManager:OnPoll()
+    if self.completed then
+        return
+    end
+
+    -- Refresh live stat rows first so a silent recovery updates the required
+    -- goal row before CheckEmergencies writes the resolved card.
+    self:RefreshLiveObjectives()
+    self:CheckEmergencies()
+    -- A resolved emergency is showing its recovered card for a moment; nothing
+    -- else should touch the tracker until it restores the chain mission.
+    if self.completed or self.current_mission == nil or self.emergency ~= nil then
+        return
+    end
+
     if not HasSurviveObjective(self.current_mission) then
         return
     end
@@ -387,7 +462,165 @@ function GuidedMissionManager:OnPoll()
     end
 end
 
+-- ---------------------------------------------------------------- emergencies
+
+-- "always" ignores the fired set entirely; the resolve condition is the only
+-- guard. "session" and "server" remember triggered ids (the latter in the save).
+function GuidedMissionManager:EmergencyAlreadyFired(id)
+    return Settings.emergency_frequency ~= "always"
+        and self.fired_emergencies[id] == true
+end
+
+function GuidedMissionManager:MarkEmergencyFired(id)
+    if Settings.emergency_frequency ~= "always" then
+        self.fired_emergencies[id] = true
+    end
+end
+
+-- Called on stat events, at Begin, and once per second. It both starts an
+-- emergency and resolves the active one.
+function GuidedMissionManager:CheckEmergencies()
+    if self.emergency ~= nil then
+        if Emergencies.IsResolved(self.emergency, self.inst) then
+            self:ResolveEmergency()
+        end
+        return
+    end
+
+    -- Nothing to replace: not started, chain finished, between missions (the
+    -- 3-second won hold), or showing a recovered card.
+    if not self.started or self.completed or self.current_mission == nil
+        or self.hold_task ~= nil or self.emergency_hold_task ~= nil then
+        return
+    end
+
+    -- Ghosts cannot act on their stats (a dead player's health reads 0).
+    local health = self.inst.components ~= nil and self.inst.components.health or nil
+    if health ~= nil and health.IsDead ~= nil and health:IsDead() then
+        return
+    end
+
+    -- First matching entry wins; file order is the tie-breaker.
+    for _, entry in ipairs(Emergencies.entries) do
+        if not self:EmergencyAlreadyFired(entry.id)
+            and Emergencies.IsTriggered(entry, self.inst) then
+            self:ActivateEmergency(entry)
+            return
+        end
+    end
+end
+
+function GuidedMissionManager:ActivateEmergency(entry)
+    if entry == nil or self.emergency ~= nil or self.current_mission == nil then
+        return false
+    end
+
+    -- Pause the chain: keep both the mission and its exact progress table.
+    self.suspended_mission = self.current_mission
+    self.suspended_progress = self.progress
+
+    self.emergency = entry
+    self:MarkEmergencyFired(entry.id)
+    self.current_mission = entry
+    self.progress = {}
+    self.last_poll_day = nil
+
+    for i, objective in ipairs(entry.objectives or {}) do
+        self.progress[i] = Objectives.InitialProgress(self.inst, objective)
+    end
+
+    self:Sync()
+    self:Log(string.format(
+        "%s - Emergency: %s",
+        self.inst:GetDisplayName(),
+        entry.title
+    ))
+    return true
+end
+
+-- Show the recovered card, then restore the paused chain mission after the
+-- same 3-second hold a normal completion uses. The chain index never moves.
+function GuidedMissionManager:ResolveEmergency()
+    local entry = self.emergency
+    if entry == nil then
+        return
+    end
+
+    Netvars.Write(self.inst, {
+        title = entry.title,
+        subtext = entry.resolved_subtext or entry.subtext or "",
+        hint = "",
+        rows = FormatRows(entry, self.progress, false),
+        state = "won",
+    })
+
+    self.emergency = nil
+    self.current_mission = nil
+    self.progress = {}
+
+    self:Log(string.format(
+        "%s - Emergency resolved: %s",
+        self.inst:GetDisplayName(),
+        entry.title
+    ))
+
+    if self.emergency_hold_task ~= nil then
+        self.emergency_hold_task:Cancel()
+        self.emergency_hold_task = nil
+    end
+
+    self.emergency_hold_task = self.inst:DoTaskInTime(HOLD_SECONDS, function()
+        self.emergency_hold_task = nil
+
+        self.current_mission = self.suspended_mission
+        self.progress = self.suspended_progress or {}
+        self.suspended_mission = nil
+        self.suspended_progress = nil
+        self.last_poll_day = nil
+
+        if self.current_mission == nil then
+            return
+        end
+
+        -- A survive day may have arrived while the chain was paused.
+        self:CheckCompletion()
+        if self.current_mission ~= nil then
+            -- Items gained during the pause count now: collect progress is
+            -- peak-holdings, so this can only raise it.
+            self:ReconcileInventory()
+            if self.current_mission ~= nil then
+                self:Sync()
+            end
+        end
+    end)
+end
+
+-- Drop the overlay without showing a recovered card. Used by admin jumps and
+-- load, where the visible mission is about to be replaced anyway.
+function GuidedMissionManager:ClearEmergency()
+    if self.emergency_hold_task ~= nil then
+        self.emergency_hold_task:Cancel()
+        self.emergency_hold_task = nil
+    end
+
+    if self.inventory_task ~= nil then
+        self.inventory_task:Cancel()
+        self.inventory_task = nil
+    end
+
+    self.emergency = nil
+    self.suspended_mission = nil
+    self.suspended_progress = nil
+end
+
 function GuidedMissionManager:CheckCompletion()
+    -- Emergencies resolve on their stat condition, never on objectives. All of
+    -- their rows are optional, so without this guard they would "complete"
+    -- immediately and advance the chain.
+    if self.emergency ~= nil then
+        return
+    end
+
     local mission = self.current_mission
     if mission == nil then
         return
@@ -458,6 +691,18 @@ function GuidedMissionManager:Sync()
         return
     end
 
+    if self.emergency ~= nil then
+        local entry = self.emergency
+        Netvars.Write(self.inst, {
+            title = entry.title,
+            subtext = entry.subtext or "",
+            hint = entry.hint or "",
+            rows = FormatRows(entry, self.progress, false),
+            state = "emergency",
+        })
+        return
+    end
+
     local mission = self.current_mission
     if mission == nil then
         return
@@ -488,11 +733,23 @@ function GuidedMissionManager:Announce(message)
 end
 
 function GuidedMissionManager:OnSave()
+    -- While an emergency is showing (or its recovered card holds), the chain
+    -- mission and its progress are the suspended ones. The emergency itself is
+    -- never saved: a load resumes the chain exactly where it was.
+    local mission = self.suspended_mission
+        or (self.emergency == nil and self.current_mission or nil)
+    local progress = self.suspended_progress
+        or (self.emergency == nil and self.progress or {})
+
     return {
         mission_index = self.mission_index,
-        mission_id = self.current_mission ~= nil and self.current_mission.id or nil,
-        progress = self.progress,
+        mission_id = mission ~= nil and mission.id or nil,
+        progress = progress,
         completed = self.completed,
+        -- Only "server" frequency survives a load; "session" intentionally
+        -- re-arms when the session ends.
+        fired_emergencies = Settings.emergency_frequency == "server"
+            and self.fired_emergencies or nil,
     }
 end
 
@@ -501,10 +758,20 @@ function GuidedMissionManager:OnLoad(data)
         return
     end
 
+    -- A load always starts without an overlay; the saved chain mission is the
+    -- one OnSave wrote from the suspended fields.
+    self:ClearEmergency()
+
     self.mission_index = tonumber(data.mission_index) or 0
     self.progress = type(data.progress) == "table" and data.progress or {}
     self.completed = data.completed == true
     self.loaded = true
+
+    self.fired_emergencies = {}
+    if Settings.emergency_frequency == "server"
+        and type(data.fired_emergencies) == "table" then
+        self.fired_emergencies = data.fired_emergencies
+    end
 
     -- Prefer the stable mission id so reordering missions.lua does not
     -- silently move an in-progress player to the wrong mission.
@@ -549,6 +816,11 @@ function GuidedMissionManager:OnRemoveFromEntity()
     if self.hold_task ~= nil then
         self.hold_task:Cancel()
         self.hold_task = nil
+    end
+
+    if self.emergency_hold_task ~= nil then
+        self.emergency_hold_task:Cancel()
+        self.emergency_hold_task = nil
     end
 end
 

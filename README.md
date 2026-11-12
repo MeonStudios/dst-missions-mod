@@ -10,7 +10,8 @@ playthrough. Mission progress is server-authoritative and saved per player.
    `C:\Program Files (x86)\Steam\steamapps\common\Don't Starve Together\mods\dst-mission-mod`
 2. Start DST, open **Mods**, and enable **Guided Missions**.
 3. Start or resume a world. All clients must have the mod installed.
-4. Optional: use **Mods → Configure** to toggle the tracker or completion announcements.
+4. Optional: use **Mods → Configure** to toggle the tracker, completion announcements,
+   or the emergency repeat mode.
 
 ## Configure missions
 
@@ -41,8 +42,10 @@ Supported objective types:
 | `survive` | `day`             | the world reaches that day |
 | `chop`    | `count`           | the player fells `count` trees (any tree prefab, axe/chop action only) |
 | `eat`     | `prefab`, `count` | the player eats `count` of the food prefab |
+| `sleep`   | `count`, optional `prefab` (a bed) | the player enters a tent/siesta hut/bedroll `count` times |
 | `heal`    | `count`           | the player restores `count` health (requested amounts, including overheal) |
 | `sanity`  | `count`           | the player restores `count` sanity (any source, including overflow at full sanity) |
+| `reach_stat` | `stat`, `threshold` | the player's health/sanity meets the threshold (live percentage, e.g. `">=75"`) |
 | `mine`    | `count`           | the player finishes mining `count` nodes with a pickaxe |
 | `pick`    | `prefab`, `count` | the player picks `count` of the plant prefab |
 | `plant`   | `count`, optional `prefab` (a seed) | the player plants `count` seeds in tilled farm soil |
@@ -142,12 +145,44 @@ other `TECH.NONE` recipes are considered known from the start, so building one f
 first time does not count as a prototype (and `prefab = "axe"` would never
 complete). Use `craft` for those, e.g. `{ type = "craft", prefab = "axe", count = 1 }`.
 
+## Emergency missions
+
+Separate from the ordered chain, the mod can pop up a guidance card when a player's
+health or sanity drops below a threshold. It replaces the current mission card and
+resolves automatically when the stat recovers; the interrupted mission keeps its progress
+and resumes exactly where it was.
+
+Emergencies live in
+[`scripts/guidedmissions/emergencies.lua`](scripts/guidedmissions/emergencies.lua):
+
+```lua
+{
+    id = "emergency_low_health",
+    title = "Bleeding Out",
+    subtext = "Patch yourself up before something finishes the job.",
+    resolved_subtext = "You're stable again.",
+    trigger = { kind = "stat", stat = "health", threshold = "<50" },
+    resolve = { kind = "stat", stat = "health", threshold = ">=75" },
+    objectives = {
+        { type = "heal", count = 20, label = "Restore 20 health", optional = true },
+    },
+}
+```
+
+Thresholds are strings so inclusivity is explicit: `"<50"` is below 50%, `"<=50"`
+includes 50, `">=75"` includes 75 and above. Every emergency objective must be
+`optional = true`; an emergency ends on its stat condition, never on objective
+completion. **Mods → Configure → Emergency Repeat** controls whether the same emergency
+may fire every time, once per session (default), or once per server/world — per player.
+The full schema is in [`docs/emergencies.md`](docs/emergencies.md).
+
 ## Retest with admin commands
 
 As an admin (the host in a locally hosted world), open the debug console with `~`
 and run:
 
-- `c_resetmissions()` — restart your own chain from mission 1.
+- `c_resetmissions()` — restart your own chain from mission 1. Also re-arms emergency
+  pop-ups for another test.
 - `c_setmission(n)` — jump straight to mission `n` (1-based, in the order missions
   appear in `missions.lua`), e.g. `c_setmission(5)`. One past the last mission shows
   the completion state.
@@ -171,8 +206,10 @@ items.
 - The tracker appears at the top-left for every player, showing the active mission and
   objective progress.
 - Missions advance automatically when all objectives are complete.
-- Mission completions are announced in chat (can be disabled). Mission starts are not
-  announced — the tracker already shows the active mission.
+- A low-health or low-sanity **emergency** can replace the card; it resolves by itself
+  when the stat recovers, and the interrupted mission resumes with its progress intact.
+- Mission completions are announced in chat (can be disabled). Mission starts and
+  emergency pop-ups are not announced — the tracker already shows them.
 - After the last mission the tracker shows **All missions complete!**
 - Progress is per player and survives save/load.
 
@@ -194,6 +231,9 @@ items.
   item gained and spent before that reread runs can be missed.
 - The tracker is text-only with a fixed layout; long objective lists can overflow.
 - Completion is announced globally, with no per-player popup.
+- Emergency objectives are all optional, so every emergency row sits under the
+  `Optional` heading.
+- "Once per server" emergency tracking is per player, not shared by the group.
 - No localization, no custom icons, no mission editor UI.
 
 ## Roadmap

@@ -204,6 +204,9 @@ end
 local Netvars = require("guidedmissions/netvars")
 local Objectives = require("guidedmissions/objectives")
 local RealMissions = require("guidedmissions/missions")
+local RealEmergencies = require("guidedmissions/emergencies")
+-- The manager and this harness share the same settings table instance.
+local Settings = require("guidedmissions/settings")
 
 local failures = 0
 
@@ -303,7 +306,48 @@ local needs_prefab = {
 -- either ignores the field or does not have one.
 local optional_prefab = {
     cook = true, cookpot = true, prototype = true, plant = true, trap_catch = true,
+    sleep = true,
 }
+
+-- Shared by chain and emergency validation. Returns `optional == true` so the
+-- mission loop can count rows that gate completion.
+local function ValidateObjectiveFields(where, objective, index)
+    local row = string.format("%s objective %d (%s)", where, index, tostring(objective.type))
+    Check(row .. " uses a known type", Objectives.VALID_TYPES[objective.type] == true)
+    Check(row .. " optional flag is a boolean",
+        objective.optional == nil or type(objective.optional) == "boolean")
+
+    if needs_prefab[objective.type] then
+        Check(row .. " names a prefab id", IsPrefabId(objective.prefab))
+    elseif not optional_prefab[objective.type] and objective.type ~= "survive" then
+        -- A prefab field on a type that ignores it is almost always a
+        -- `collect`/`collect_food` mix-up; the two read different events.
+        Check(row .. " does not set a prefab", objective.prefab == nil)
+    elseif objective.prefab ~= nil then
+        Check(row .. " prefab filter is a prefab id", IsPrefabId(objective.prefab))
+    end
+
+    Check(row .. " has a label",
+        type(objective.label) == "string" and #objective.label > 0)
+    if objective.icon ~= nil then
+        Check(row .. " icon is a prefab id", IsPrefabId(objective.icon))
+    end
+
+    if objective.type == "survive" then
+        Check(row .. " has a day", tonumber(objective.day) ~= nil)
+    elseif objective.type == "reach_stat" then
+        -- A live stat row has no count: it tracks a percentage against a
+        -- threshold string on the same 0-100 scale as emergency conditions.
+        Check(row .. " names a known stat",
+            RealEmergencies.VALID_STATS[objective.stat] == true)
+        local operator = RealEmergencies.ParseThreshold(objective.threshold)
+        Check(row .. " threshold parses", operator ~= nil)
+    else
+        Check(row .. " has a count", tonumber(objective.count) ~= nil)
+    end
+
+    return objective.optional == true
+end
 
 local seen_ids = {}
 for i, mission in ipairs(RealMissions) do
@@ -327,38 +371,87 @@ for i, mission in ipairs(RealMissions) do
     -- starts, so require at least one objective that gates completion.
     local required_count = 0
     for j, objective in ipairs(mission.objectives or {}) do
-        local row = string.format("%s objective %d (%s)", where, j, tostring(objective.type))
-        Check(row .. " uses a known type", Objectives.VALID_TYPES[objective.type] == true)
-        Check(row .. " optional flag is a boolean",
-            objective.optional == nil or type(objective.optional) == "boolean")
-        if objective.optional ~= true then
+        if not ValidateObjectiveFields(where, objective, j) then
             required_count = required_count + 1
-        end
-
-        if needs_prefab[objective.type] then
-            Check(row .. " names a prefab id", IsPrefabId(objective.prefab))
-        elseif not optional_prefab[objective.type] and objective.type ~= "survive" then
-            -- A prefab field on a type that ignores it is almost always a
-            -- `collect`/`collect_food` mix-up; the two read different events.
-            Check(row .. " does not set a prefab", objective.prefab == nil)
-        elseif objective.prefab ~= nil then
-            Check(row .. " prefab filter is a prefab id", IsPrefabId(objective.prefab))
-        end
-
-        Check(row .. " has a label",
-            type(objective.label) == "string" and #objective.label > 0)
-        if objective.icon ~= nil then
-            Check(row .. " icon is a prefab id", IsPrefabId(objective.icon))
-        end
-
-        if objective.type == "survive" then
-            Check(row .. " has a day", tonumber(objective.day) ~= nil)
-        else
-            Check(row .. " has a count", tonumber(objective.count) ~= nil)
         end
     end
 
     Check(where .. " has at least one required objective", required_count > 0)
+end
+
+-- Emergency data sanity, against the real emergencies.lua. The manager treats
+-- these entries as mission-shaped, so they get the same objective rules plus a
+-- strict trigger/resolve schema.
+local emergency_ids = {}
+for i, entry in ipairs(RealEmergencies.entries) do
+    local where = string.format("emergency %d (%s)", i, tostring(entry.id))
+
+    Check(where .. " has a unique id",
+        IsPrefabId(entry.id) and emergency_ids[entry.id] == nil)
+    if type(entry.id) == "string" then
+        emergency_ids[entry.id] = true
+    end
+    Check(where .. " has a title",
+        type(entry.title) == "string" and #entry.title > 0)
+    Check(where .. " has a subtext",
+        type(entry.subtext) == "string" and #entry.subtext > 0)
+    Check(where .. " resolved_subtext is text when set",
+        entry.resolved_subtext == nil
+            or (type(entry.resolved_subtext) == "string" and #entry.resolved_subtext > 0))
+    Check(where .. " hint is text when set",
+        entry.hint == nil or (type(entry.hint) == "string" and #entry.hint > 0))
+
+    local function ValidateCondition(name, condition, want_low)
+        Check(where .. " " .. name .. " is a table", type(condition) == "table")
+        if type(condition) ~= "table" then
+            return nil
+        end
+        Check(where .. " " .. name .. " kind is known",
+            RealEmergencies.VALID_KINDS[condition.kind] == true)
+        Check(where .. " " .. name .. " stat is known",
+            RealEmergencies.VALID_STATS[condition.stat] == true)
+
+        local operator, value = RealEmergencies.ParseThreshold(condition.threshold)
+        Check(where .. " " .. name .. " threshold parses", operator ~= nil)
+        if operator ~= nil then
+            local is_low = operator == "<" or operator == "<="
+            Check(where .. " " .. name .. " uses a "
+                .. (want_low and "low" or "high") .. " comparison", is_low == want_low)
+        end
+        return value
+    end
+
+    local trigger_value = ValidateCondition("trigger", entry.trigger, true)
+    local resolve_value = ValidateCondition("resolve", entry.resolve, false)
+    Check(where .. " trigger and resolve use the same stat",
+        type(entry.trigger) == "table" and type(entry.resolve) == "table"
+            and entry.trigger.stat == entry.resolve.stat)
+    if trigger_value ~= nil and resolve_value ~= nil then
+        Check(where .. " resolve is at or above the trigger",
+            resolve_value >= trigger_value)
+    end
+
+    Check(where .. " has an objective list",
+        type(entry.objectives) == "table" and #entry.objectives > 0)
+
+    -- Exactly one required row: the recovery goal. It must match `resolve`, so
+    -- the card cannot promise a threshold different from the one that ends the
+    -- emergency. Every other row is optional guidance.
+    local required_count = 0
+    for j, objective in ipairs(entry.objectives or {}) do
+        if not ValidateObjectiveFields(where, objective, j) then
+            required_count = required_count + 1
+            Check(where .. " goal row is reach_stat",
+                objective.type == "reach_stat")
+            Check(where .. " goal stat matches resolve",
+                type(entry.resolve) == "table"
+                    and objective.stat == entry.resolve.stat)
+            Check(where .. " goal threshold matches resolve",
+                type(entry.resolve) == "table"
+                    and objective.threshold == entry.resolve.threshold)
+        end
+    end
+    Check(where .. " has exactly one required goal row", required_count == 1)
 end
 
 -- Bad mission data also breaks the real-mission render smoke below, so report
@@ -394,6 +487,51 @@ local SyntheticMissions = {
     },
 }
 package.loaded["guidedmissions/missions"] = SyntheticMissions
+
+-- Emergencies bind at require time too. Keep the real helpers (the schema and
+-- stat reads are what the behavioural tests exercise) and swap only the
+-- entries, so content edits cannot break the mechanics tests.
+local SyntheticEmergencies = {
+    {
+        id = "harness_emergency_health",
+        title = "Harness Emergency Health",
+        subtext = "Hurt.",
+        resolved_subtext = "Recovered.",
+        hint = "Harness emergency hint.",
+        trigger = { kind = "stat", stat = "health", threshold = "<50" },
+        resolve = { kind = "stat", stat = "health", threshold = ">=70" },
+        objectives = {
+            { type = "reach_stat", stat = "health", threshold = ">=70",
+              label = "Get back to 70% health" },
+            { type = "heal", count = 10, label = "Restore health", optional = true },
+            { type = "collect", prefab = "log", count = 2,
+              label = "Hold logs", optional = true },
+        },
+    },
+    {
+        id = "harness_emergency_sanity",
+        title = "Harness Emergency Sanity",
+        subtext = "Fraying.",
+        resolved_subtext = "Steady.",
+        trigger = { kind = "stat", stat = "sanity", threshold = "<50" },
+        resolve = { kind = "stat", stat = "sanity", threshold = ">=75" },
+        objectives = {
+            { type = "reach_stat", stat = "sanity", threshold = ">=75",
+              label = "Get back to 75% sanity" },
+            { type = "sanity", count = 10, label = "Restore sanity", optional = true },
+        },
+    },
+}
+package.loaded["guidedmissions/emergencies"] = {
+    entries = SyntheticEmergencies,
+    VALID_STATS = RealEmergencies.VALID_STATS,
+    VALID_KINDS = RealEmergencies.VALID_KINDS,
+    GetStatFraction = RealEmergencies.GetStatFraction,
+    ParseThreshold = RealEmergencies.ParseThreshold,
+    IsTriggered = RealEmergencies.IsTriggered,
+    IsResolved = RealEmergencies.IsResolved,
+}
+
 local Manager = require("guidedmissions/manager")
 
 inst = NewInst(1234)
@@ -614,6 +752,291 @@ Check("reset title", Read(inst3)["guidedmissions.title"] == "Harness First")
 Check("reset state active", State(inst3) == "active")
 Check("reset row counter", Row(inst3, 1)[3] == "0/3")
 
+-- ---- emergency overlay ----------------------------------------------------
+--
+-- Emergencies trigger from health/sanity events and the poll, replace the
+-- chain card, and restore the chain untouched. These use the synthetic entries
+-- swapped in before the manager was required.
+
+Settings.emergency_frequency = "session"
+
+local function SetHealth(player, current, max)
+    player.components.health = { currenthealth = current, maxhealth = max or 100 }
+end
+
+local function SetSanity(player, current, max)
+    player.components.sanity = { current = current, max = max or 100 }
+end
+
+-- Threshold syntax is explicit about inclusivity.
+local function Parses(text, operator, value)
+    local op, val = RealEmergencies.ParseThreshold(text)
+    return op == operator and val == value
+end
+Check("threshold <50 parses", Parses("<50", "<", 50))
+Check("threshold <=50 parses", Parses("<=50", "<=", 50))
+Check("threshold >50 parses", Parses(">50", ">", 50))
+Check("threshold >=50 parses", Parses(">=50", ">=", 50))
+Check("threshold tolerates whitespace", Parses("  >= 75 ", ">=", 75))
+Check("threshold parses a decimal", Parses("<12.5", "<", 12.5))
+Check("threshold rejects a missing operator",
+    RealEmergencies.ParseThreshold("50") == nil)
+Check("threshold rejects a reversed operator",
+    RealEmergencies.ParseThreshold("=<50") == nil)
+Check("threshold rejects values outside 0-100",
+    RealEmergencies.ParseThreshold("<101") == nil
+        and RealEmergencies.ParseThreshold(">-1") == nil)
+
+-- Stat reads use raw fields, not GetPercent (which sanity masks).
+local stat_player = NewInst(3001)
+SetHealth(stat_player, 40, 100)
+Check("health fraction uses current/max",
+    math.abs(RealEmergencies.GetStatFraction(stat_player, "health") - 0.4) < 0.0001)
+SetSanity(stat_player, 25, 50)
+Check("sanity fraction uses current/max",
+    math.abs(RealEmergencies.GetStatFraction(stat_player, "sanity") - 0.5) < 0.0001)
+Check("missing stat fraction is nil",
+    RealEmergencies.GetStatFraction(NewInst(3002), "health") == nil)
+Check("unknown stat fraction is nil",
+    RealEmergencies.GetStatFraction(stat_player, "hunger") == nil)
+
+-- Operator boundaries: < excludes, <= includes, >= includes.
+local inclusive_entry = {
+    trigger = { kind = "stat", stat = "health", threshold = "<=50" },
+}
+local boundary_player = NewInst(3003)
+SetHealth(boundary_player, 50, 100)
+Check("<= includes the boundary",
+    RealEmergencies.IsTriggered(inclusive_entry, boundary_player))
+local resolve_entry = {
+    resolve = { kind = "stat", stat = "health", threshold = ">=75" },
+}
+SetHealth(boundary_player, 75, 100)
+Check(">= includes the boundary",
+    RealEmergencies.IsResolved(resolve_entry, boundary_player))
+SetHealth(boundary_player, 74, 100)
+Check(">= excludes below the boundary",
+    not RealEmergencies.IsResolved(resolve_entry, boundary_player))
+
+-- Trigger on a stat event, with partial chain progress to preserve.
+local em_manager, em_player = Spawn()
+Carry(em_player, "flint", 1)
+InventoryChanged(em_player)
+Check("chain progress before the emergency", Row(em_player, 1)[3] == "1/3")
+
+SetHealth(em_player, 40, 100)
+em_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("emergency pops on a health event",
+    Read(em_player)["guidedmissions.title"] == "Harness Emergency Health")
+Check("emergency state", State(em_player) == "emergency")
+Check("emergency card shows its hint",
+    Read(em_player)["guidedmissions.hint"] == "Harness emergency hint.")
+Check("chain mission is suspended",
+    em_manager.suspended_mission == SyntheticMissions[1])
+Check("chain index did not move", em_manager.mission_index == 1)
+Check("emergency goal row renders first",
+    Row(em_player, 1)[1] == "Get back to 70% health")
+Check("emergency goal counter is live",
+    Row(em_player, 1)[3] == "40/70%")
+Check("emergency optional rows render",
+    Row(em_player, 2)[1] == "Restore health"
+        and Row(em_player, 3)[1] == "Hold logs")
+
+-- Emergency objectives track but never complete the overlay or the chain.
+em_player:Fire("healthdelta", { oldpercent = 0.4, newpercent = 0.45, amount = 5 })
+Check("emergency objective tracks", Row(em_player, 2)[3] == "5/10")
+Check("emergency does not complete on objectives", State(em_player) == "emergency")
+Check("chain progress untouched during the emergency",
+    em_manager.suspended_progress[1] == 1)
+
+-- Resolve: recovered card, 3-second hold, then the chain returns intact.
+SetHealth(em_player, 80, 100)
+em_player:Fire("healthdelta", { oldpercent = 0.45, newpercent = 0.8, amount = 35 })
+Check("resolved card state", State(em_player) == "won")
+Check("resolved card title",
+    Read(em_player)["guidedmissions.title"] == "Harness Emergency Health")
+Check("resolved card subtext",
+    Read(em_player)["guidedmissions.subtext"] == "Recovered.")
+Check("resolved card drops the hint", Read(em_player)["guidedmissions.hint"] == "")
+Check("recovered card shows the goal met", Row(em_player, 1)[4] == "1")
+Check("emergency hold pending", em_manager.emergency_hold_task ~= nil)
+Check("chain stays hidden during the recovery hold", em_manager.current_mission == nil)
+
+Advance(3)
+Check("chain restored after the hold",
+    Read(em_player)["guidedmissions.title"] == "Harness First")
+Check("chain state active after the hold", State(em_player) == "active")
+Check("chain progress survived the emergency", Row(em_player, 1)[3] == "1/3")
+Check("chain index still unchanged", em_manager.mission_index == 1)
+
+-- Once per session: a fresh drop does not re-trigger.
+SetHealth(em_player, 40, 100)
+em_player:Fire("healthdelta", { oldpercent = 0.8, newpercent = 0.4, amount = -40 })
+Check("no retrigger in the same session",
+    Read(em_player)["guidedmissions.title"] == "Harness First")
+Check("still active after the suppressed trigger", State(em_player) == "active")
+
+-- Per-trigger: the sanity emergency can still fire once.
+SetSanity(em_player, 40, 100)
+em_player:Fire("sanitydelta", { oldpercent = 0.9, newpercent = 0.4 })
+Check("sanity emergency triggers independently",
+    Read(em_player)["guidedmissions.title"] == "Harness Emergency Sanity")
+SetSanity(em_player, 80, 100)
+em_player:Fire("sanitydelta", { oldpercent = 0.4, newpercent = 0.8 })
+Check("sanity recovered card", State(em_player) == "won")
+Advance(3)
+Check("chain restored after the sanity emergency",
+    Read(em_player)["guidedmissions.title"] == "Harness First")
+
+-- Precise threshold: exactly 50% does not trigger "<50"; 49% does.
+local exact_manager, exact_player = Spawn(function(target)
+    target.components.health = { currenthealth = 50, maxhealth = 100 }
+end)
+Check("exact threshold does not trigger", State(exact_player) == "active")
+local below_manager, below_player = Spawn(function(target)
+    target.components.health = { currenthealth = 49, maxhealth = 100 }
+end)
+Check("below threshold triggers", State(below_player) == "emergency")
+
+-- Missing components and ghosts never trigger.
+local bare_manager, bare_player = Spawn()
+Check("no stat components means no emergency", State(bare_player) == "active")
+local ghost_manager, ghost_player = Spawn(function(target)
+    target.components.health = {
+        currenthealth = 0,
+        maxhealth = 100,
+        IsDead = function() return true end,
+    }
+end)
+Check("no emergency while dead", State(ghost_player) == "active")
+
+-- Begin triggers immediately for a player already below the threshold.
+local begin_manager, begin_player = Spawn(function(target)
+    target.components.health = { currenthealth = 30, maxhealth = 100 }
+end)
+Check("Begin triggers for a low-health player", State(begin_player) == "emergency")
+
+-- "always" ignores the fired set; a fresh drop re-triggers.
+Settings.emergency_frequency = "always"
+local always_manager, always_player = Spawn()
+SetHealth(always_player, 40, 100)
+always_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("always mode triggers", State(always_player) == "emergency")
+SetHealth(always_player, 80, 100)
+always_player:Fire("healthdelta", { oldpercent = 0.4, newpercent = 0.8, amount = 40 })
+Advance(3)
+SetHealth(always_player, 40, 100)
+always_player:Fire("healthdelta", { oldpercent = 0.8, newpercent = 0.4, amount = -40 })
+Check("always mode re-triggers", State(always_player) == "emergency")
+Settings.emergency_frequency = "session"
+
+-- "server" persists the fired set in the save.
+Settings.emergency_frequency = "server"
+local server_manager, server_player = Spawn()
+SetHealth(server_player, 40, 100)
+server_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("server mode triggers", State(server_player) == "emergency")
+local server_save = server_manager:OnSave()
+Check("server mode saves the fired set",
+    type(server_save.fired_emergencies) == "table"
+        and server_save.fired_emergencies["harness_emergency_health"] == true)
+Check("server save stores the chain mission",
+    server_save.mission_id == "harness_first")
+Check("server save stores the chain progress",
+    server_save.progress[1] == 0)
+
+local restored_inst = NewInst(4001)
+SetHealth(restored_inst, 100, 100)
+Netvars.Attach(restored_inst)
+local restored_manager = Manager(restored_inst)
+restored_manager:OnLoad(server_save)
+Advance(1)
+SetHealth(restored_inst, 40, 100)
+restored_inst:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("server mode suppresses a saved trigger",
+    Read(restored_inst)["guidedmissions.title"] == "Harness First")
+Settings.emergency_frequency = "session"
+
+-- A save during an emergency stores the chain, not the overlay.
+local save_manager, save_player = Spawn()
+Carry(save_player, "flint", 1)
+InventoryChanged(save_player)
+SetHealth(save_player, 40, 100)
+save_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("save test emergency active", State(save_player) == "emergency")
+local save_data = save_manager:OnSave()
+Check("save mid-emergency stores the chain mission",
+    save_data.mission_id == "harness_first")
+Check("save mid-emergency stores chain progress", save_data.progress[1] == 1)
+Check("save mid-emergency never stores an emergency id",
+    save_data.mission_id ~= "harness_emergency_health")
+Check("save mid-emergency omits a session fired set",
+    save_data.fired_emergencies == nil)
+
+local reload_inst = NewInst(4002)
+SetHealth(reload_inst, 100, 100)
+Netvars.Attach(reload_inst)
+local reload_manager = Manager(reload_inst)
+reload_manager:OnLoad(save_data)
+Advance(1)
+Check("load mid-emergency resumes the chain",
+    Read(reload_inst)["guidedmissions.title"] == "Harness First")
+Check("load mid-emergency restores progress", Row(reload_inst, 1)[3] == "1/3")
+Check("load mid-emergency drops the overlay", reload_manager.emergency == nil)
+
+-- An admin jump clears the overlay; Reset also re-arms emergencies.
+local jump_manager, jump_player = Spawn()
+SetHealth(jump_player, 40, 100)
+jump_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("jump test emergency active", State(jump_player) == "emergency")
+Check("jump accepted", jump_manager:JumpTo(2) == true)
+Check("jump lands on mission 2",
+    Read(jump_player)["guidedmissions.title"] == "Harness Second")
+Check("jump clears the overlay", jump_manager.emergency == nil
+    and jump_manager.suspended_mission == nil)
+
+jump_manager.fired_emergencies["harness_emergency_health"] = true
+jump_manager:JumpTo(2)
+Check("a jump keeps the fired set",
+    jump_manager.fired_emergencies["harness_emergency_health"] == true)
+jump_manager:Reset()
+Check("reset clears the fired set",
+    next(jump_manager.fired_emergencies) == nil)
+
+-- No trigger during the chain's won hold or after the chain is complete.
+local hold_manager, hold_player = Spawn()
+hold_manager.progress[1] = 3
+hold_manager:CheckCompletion()
+Check("chain hold active", State(hold_player) == "won")
+SetHealth(hold_player, 40, 100)
+hold_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("no emergency during the chain hold", State(hold_player) == "won")
+
+local done_manager, done_player = Spawn()
+done_manager:JumpTo(#SyntheticMissions + 1)
+SetHealth(done_player, 40, 100)
+done_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("no emergency after chain completion", State(done_player) == "done")
+Advance(1)
+Check("still no emergency after a poll", State(done_player) == "done")
+
+-- Cleanup cancels the recovered-card hold as well.
+local cleanup_manager, cleanup_player = Spawn()
+SetHealth(cleanup_player, 40, 100)
+cleanup_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+SetHealth(cleanup_player, 80, 100)
+cleanup_player:Fire("healthdelta", { oldpercent = 0.4, newpercent = 0.8, amount = 40 })
+Check("cleanup: recovered hold pending", cleanup_manager.emergency_hold_task ~= nil)
+cleanup_manager:OnRemoveFromEntity()
+local emergency_live_tasks = 0
+for _, task in ipairs(tasks) do
+    if task.owner == cleanup_player and not task.cancelled then
+        emergency_live_tasks = emergency_live_tasks + 1
+    end
+end
+Check("cleanup: all emergency tasks cancelled",
+    cleanup_manager.emergency_hold_task == nil and emergency_live_tasks == 0)
+
 -- ---- objective type fixtures ---------------------------------------------
 --
 -- One self-contained fixture per type in `Objectives.VALID_TYPES`. They use
@@ -830,6 +1253,71 @@ type_fixtures.eat = function()
     Check("eating other food does not count", State(player) == "active")
     player:Fire("oneat", { food = { prefab = "butterflywings" } })
     Check("eat completes on the target food", State(player) == "won")
+end
+
+type_fixtures.sleep = function()
+    local fixture_manager, player = Spawn()
+    Activate(fixture_manager, player, {
+        id = "fixture_sleep",
+        title = "Lights Out",
+        subtext = "Rest.",
+        objectives = {
+            { type = "sleep", prefab = "tent", count = 1, label = "Sleep in a tent" },
+        },
+    })
+    Check("sleep label is rendered", Row(player, 1)[1] == "Sleep in a tent")
+    Check("sleep row is text-only", Row(player, 1)[2] == "")
+
+    -- The event is pushed by modmain's sleepingbaguser hook; it carries the bed
+    -- entity, so a prefab filter matches its prefab.
+    player:Fire("guidedmissions_slept", { bed = { prefab = "siestahut" } })
+    Check("sleeping in another bed does not count", State(player) == "active")
+    player:Fire("guidedmissions_slept", { bed = { prefab = "tent" } })
+    Check("sleeping in the target bed completes", State(player) == "won")
+
+    -- Without a filter any sleeping bag counts: tent, siesta hut or bedroll.
+    local any_manager, any_player = Spawn()
+    Activate(any_manager, any_player, {
+        id = "fixture_sleep_any",
+        title = "Any Bed",
+        subtext = "Any port in a storm.",
+        objectives = {
+            { type = "sleep", count = 2, label = "Sleep in a bed" },
+        },
+    })
+    any_player:Fire("guidedmissions_slept", { bed = { prefab = "bedroll_straw" } })
+    Check("unfiltered sleep counts a bedroll", Row(any_player, 1)[3] == "1/2")
+    any_player:Fire("guidedmissions_slept", { bed = { prefab = "siestahut" } })
+    Check("unfiltered sleep completes at the target", State(any_player) == "won")
+end
+
+type_fixtures.reach_stat = function()
+    local fixture_manager, player = Spawn(function(target)
+        -- 60 is above the harness emergency's "<50" trigger, so this fixture
+        -- exercises the row without an emergency taking over the card.
+        target.components.health = { currenthealth = 60, maxhealth = 100 }
+    end)
+    Activate(fixture_manager, player, {
+        id = "fixture_reach_stat",
+        title = "Recover",
+        subtext = "Get back up.",
+        objectives = {
+            { type = "reach_stat", stat = "health", threshold = ">=75",
+              label = "Get back to 75% health" },
+        },
+    })
+    Check("reach_stat label is rendered", Row(player, 1)[1] == "Get back to 75% health")
+    Check("reach_stat icon is the heart", Row(player, 1)[2] == "heart")
+    Check("reach_stat counter shows current/target", Row(player, 1)[3] == "60/75%")
+    Check("reach_stat is incomplete at 60%", State(player) == "active")
+
+    -- It mirrors the live stat (it may fall), refreshed by the poll.
+    player.components.health.currenthealth = 50
+    Advance(1)
+    Check("reach_stat follows a drop", Row(player, 1)[3] == "50/75%")
+    player.components.health.currenthealth = 80
+    Advance(1)
+    Check("reach_stat completes at the threshold", State(player) == "won")
 end
 
 type_fixtures.heal = function()
@@ -1208,6 +1696,33 @@ for i, mission in ipairs(RealMissions) do
     local label = string.format("real mission %d (%s) renders", i, tostring(mission.id))
     local rows = Rows(Read(player)["guidedmissions.rows"])
     Check(label .. " one row per objective", #rows == #(mission.objectives or {}))
+
+    local well_formed = true
+    for _, fields in ipairs(rows) do
+        if fields[1] == nil or fields[1] == ""
+            or fields[3] == nil or fields[3] == ""
+            or fields[4] == nil then
+            well_formed = false
+        end
+    end
+    Check(label .. " every row has a label, counter and done flag", well_formed)
+end
+
+-- ---- real emergency render smoke ----------------------------------------
+--
+-- Same contract as the mission smoke, using the real emergency entries.
+
+for i, entry in ipairs(RealEmergencies.entries) do
+    local smoke_manager, player = Spawn()
+    Check("real emergency " .. i .. " activates",
+        smoke_manager:ActivateEmergency(entry) == true)
+
+    local label = string.format("real emergency %d (%s) renders", i, tostring(entry.id))
+    Check(label .. " state", State(player) == "emergency")
+    Check(label .. " title", Read(player)["guidedmissions.title"] == entry.title)
+
+    local rows = Rows(Read(player)["guidedmissions.rows"])
+    Check(label .. " one row per objective", #rows == #(entry.objectives or {}))
 
     local well_formed = true
     for _, fields in ipairs(rows) do

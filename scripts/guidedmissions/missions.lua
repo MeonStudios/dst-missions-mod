@@ -3,6 +3,9 @@
 -- Missions run in order. Each player progresses independently. Edit this file
 -- to build your own guided playthrough; see docs/objectives.md for the full schema.
 --
+-- Emergency pop-up missions are a separate, unordered collection in
+-- `emergencies.lua`; see docs/emergencies.md.
+--
 -- Objective types (full reference: docs/objectives.md):
 --   collect:      prefab, count              -> hold `count` of `prefab` (peak holdings)
 --   craft:        prefab, count              -> craft `count` inventory items
@@ -13,8 +16,10 @@
 --   chop:         count                      -> fell `count` trees
 --   mine:         count                      -> finish mining `count` nodes
 --   eat:          prefab, count              -> eat `count` of `prefab`
+--   sleep:        count, prefab?             -> enter a tent/bedroll `count` times
 --   heal:         count                      -> restore `count` health points
 --   sanity:       count                      -> restore `count` sanity points
+--   reach_stat:   stat, threshold            -> stat meets a live percentage (">=75")
 --   pick:         prefab, count              -> pick `count` plants
 --   collect_food: count, foodtype?,          -> hold `count` edible items
 --                 secondaryfoodtype?

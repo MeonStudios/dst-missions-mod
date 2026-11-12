@@ -48,6 +48,15 @@ starts.
 Missions run in file order. Each player advances independently after a 3-second
 "won" hold. The last mission is followed by a terminal "All Missions Complete" card.
 
+## Emergency missions
+
+Pop-up emergencies are a separate, unordered collection in
+[`emergencies.lua`](../scripts/guidedmissions/emergencies.lua). They reuse the objective
+schema on this page, but each entry has `trigger`/`resolve` conditions instead of a chain
+position, and **every emergency objective must set `optional = true`** — the card
+resolves on a stat threshold, never on objective completion. See
+[`emergencies.md`](emergencies.md) for the full schema.
+
 ## How progress is counted
 
 There are three mechanisms:
@@ -197,6 +206,64 @@ Check `count` traps that hold a catch.
 { type = "trap_catch", prefab = "rabbit", count = 3, label = "Catch rabbits" }
 { type = "trap_catch", prefab = "froglegs", count = 2, label = "Trap frogs" }
 { type = "trap_catch", count = 1, label = "Check a trap with a catch" }
+```
+
+### `sleep`
+
+Enter a sleeping bag `count` times.
+
+| Field | Required | Default |
+|---|---|---|
+| `count` | yes | — |
+| `prefab` | no | any sleeping bag |
+
+- **Completes when:** the player gets into a tent, siesta hut, or bedroll,
+  `count` times.
+- **Trigger:** the `guidedmissions_slept` player event, pushed by
+  `modmain.lua`'s `sleepingbaguser` post-init from
+  `SleepingBag:DoSleep(doer)` (`components/sleepingbag.lua:61-73`). The payload
+  is `{ bed = <the bed entity> }`.
+- **Entry, not wake-up:** credit lands the moment the player enters. Waking
+  early, being woken by fire, or a starved sleep still counts.
+- **Matching:** without `prefab`, any sleeping bag counts. Set
+  `prefab = "tent"` to require a tent specifically (the bed entity's prefab is
+  matched), or `"siestahut"` for the lean-to.
+- **Icon:** none — the row is text-only, and `icon` is ignored.
+
+```lua
+{ type = "sleep", prefab = "tent", count = 1, label = "Sleep in a tent" }
+{ type = "sleep", count = 2, label = "Sleep in a bed" }
+```
+
+### `reach_stat`
+
+Reach a threshold on a stat, read live.
+
+| Field | Required | Default |
+|---|---|---|
+| `stat` | yes | — (`"health"` or `"sanity"`) |
+| `threshold` | yes | — (for example `">=75"`) |
+| `icon` | no | `heart` / `brain` |
+
+- **Completes when:** the player's stat meets the comparison. The counter shows
+  the current percentage against the threshold, for example `40/75%`.
+- **Live, not accumulated:** progress mirrors the current stat and can fall as
+  well as rise. It refreshes on `healthdelta`/`sanitydelta` and once per second.
+- **Threshold syntax:** the same strings emergency conditions use — `<`, `<=`,
+  `>`, `>=` followed by a 0-100 value, with optional whitespace. A malformed
+  threshold never completes.
+- **Already true:** if the condition holds when the mission starts, it completes
+  immediately (like `survive`'s past day). Emergencies avoid this because their
+  trigger sits below the goal threshold.
+- **Emergency goal rows:** an emergency's single required objective is a
+  `reach_stat` whose `stat` and `threshold` match the emergency's `resolve`
+  condition (the harness enforces this). The emergency still ends on the resolve
+  condition, not on objective completion.
+- **Icon:** the HUD heart for health and brain for sanity; `icon` overrides.
+
+```lua
+{ type = "reach_stat", stat = "health", threshold = ">=75", label = "Get back to 75% health" }
+{ type = "reach_stat", stat = "sanity", threshold = ">=50", label = "Get sanity back to 50%" }
 ```
 
 ### `survive`
@@ -488,6 +555,8 @@ Learn `count` new recipes.
 | Learn recipes | `prototype` |
 | Chop / mine / pick verbs | `chop` / `mine` / `pick` |
 | Plant seeds in tilled soil | `plant` |
+| Sleep in a tent | `sleep` |
+| Reach a stat percentage | `reach_stat` |
 
 ## Event mapping
 
@@ -510,12 +579,14 @@ Learn `count` new recipes.
 | `prototype` | `unlockrecipe` | `data.recipe` matched to objective `prefab` (a recipe id), deduplicated |
 | `plant` | `guidedmissions_plantedseed` (mod pushed) | `seed` (a prefab id string) |
 | `trap_catch` | `guidedmissions_trapchecked` (mod pushed) | objective `prefab` matched against any entry in `data.loot` |
+| `sleep` | `guidedmissions_slept` (mod pushed) | objective `prefab` matched to `data.bed.prefab` |
+| `reach_stat` | `healthdelta` / `sanitydelta` + 1 s poll | live stat percentage vs objective `threshold` |
 
-`cookedfood`/`stewedfood`/`plantedseed`/`trapchecked` exist because vanilla fire
-cooking, Crock Pot cooking, seed planting and trap checking emit no player event;
-`modmain.lua` post-inits the `cooker`, `stewer`, `farmplantable`, `deployable` and
-`trap` components to report them. See `docs/dst-api.md` for the verified engine
-behavior behind each row.
+`cookedfood`/`stewedfood`/`plantedseed`/`trapchecked`/`slept` exist because vanilla
+fire cooking, Crock Pot cooking, seed planting, trap checking and entering a bed emit
+no player event; `modmain.lua` post-inits the `cooker`, `stewer`, `farmplantable`,
+`deployable`, `trap` and `sleepingbaguser` components to report them. See
+`docs/dst-api.md` for the verified engine behavior behind each row.
 
 ## Adding or changing an objective type
 
