@@ -194,6 +194,24 @@ AddComponentPostInit("deployable", function(self)
     end
 end)
 
+-- Traps. The player learns what they caught only when they check the trap:
+-- the CHECKTRAP action calls `Trap:Harvest(doer)` (`actions.lua:1686-1689`).
+-- The trap's stored loot is what the objective filters on, so report it to the
+-- checker. `lootprefabs` is read before Harvest, which resets the trap. A
+-- sprung trap with no loot caught nothing and is ignored.
+AddComponentPostInit("trap", function(self)
+    local _Harvest = self.Harvest
+    self.Harvest = function(component, doer)
+        local loot = component.lootprefabs
+        local had_catch = component.issprung and loot ~= nil and #loot > 0
+        local result = _Harvest(component, doer)
+        if had_catch and doer ~= nil and doer.PushEvent ~= nil then
+            doer:PushEvent("guidedmissions_trapchecked", { loot = loot })
+        end
+        return result
+    end
+end)
+
 -- Client HUD. Dedicated servers have no local player, so skip the hook there.
 if not GLOBAL.TheNet:IsDedicated() and Settings.show_tracker then
     AddPrefabPostInit("world", function(world)

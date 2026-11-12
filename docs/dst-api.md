@@ -58,11 +58,17 @@ documented and version-dependent.
 
 - `api_version = 10` for DST.
 - Requires `dst_compatible = true`, `all_clients_require_mod = true`, `client_only_mod = false`.
-- **Mod icon** (verified 2026-11-09): set `icon_atlas = "modicon.xml"` and
-  `icon = "modicon.tex"` in `modinfo.lua`. Both must be non-empty and present in the
-  mod folder; `modindex.lua:542-556` resolves them, derives `iconpath` from the atlas
-  directory (`modindex.lua:544-547`), and **clears all three fields with a
-  `WARNING: icon paths for mod ... are not valid` print** if either file is missing.
+- **Mod icon** (verified 2026-11-09): set `icon_atlas = "icon/modicon.xml"` and
+  `icon = "modicon.tex"` in `modinfo.lua` (this repo keeps both in `icon/`;
+  `icon` is the atlas's Element name, not a path). `icon_atlas` is a path from
+  the mod root; `modindex.lua:542-556` resolves them, derives `iconpath` from the
+  atlas directory (`modindex.lua:544`:
+  `iconpath = dirname(atlaspath).."/"..icon`), so the pair may live in a
+  subfolder as long as both files sit together. The `.png` is build input only —
+  `screens/modsscreen.lua:1043-1044` draws `SetTexture(icon_atlas, icon)` and
+  `:1321-1324` preloads just the atlas and `.tex`; the game never loads the PNG.
+  Both icon files must be non-empty and present, or the game **clears all three
+  fields with a `WARNING: icon paths for mod ... are not valid` print**.
   No `Assets` entry is needed in `modmain.lua` — `ModsScreen:LoadModInfoPrefabs`
   (`screens/modsscreen.lua:1321`) preloads the atlas and image itself.
 - The Mods-menu detail pane draws the icon at **102×102**
@@ -83,13 +89,13 @@ documented and version-dependent.
   `line_horizontal_white.tex`, `arrow2_right.tex`, `red_star.tex`,
   `yellow_exclamation.tex` and `pinslot_fg_pin.tex` in `images/ui.xml` /
   `images/crafting_menu.xml`.
-- This repo's icon (`modicon.png` → `modicon.tex`) is the vanilla
+- This repo's icon (`icon/modicon.png` → `icon/modicon.tex`) is the vanilla
   `book_research_station.tex` item icon (the Everything Encyclopedia book) from
   `images/inventoryimages1.xml` (64×64 source; the `inventoryimages.xml` lists the
   same names but has no matching `.tex`), scaled 3× and placed inside the vanilla
   default frame `images/ui.xml` → `portrait_bg.tex` (128×128, upscaled 2×). That is
   the same frame the Mods screen falls back to when `icon`/`icon_atlas` are unset.
-  `tools/make_modicon.py` builds both files; it carries a minimal DXT5 KTEX writer
+  `tools/make_modicon.py` builds both files into `icon/`; it carries a minimal DXT5 KTEX writer
   because ktools (`ktech`) is not installed on this machine. The KTEX header is the
   known-good `0xFFFD2220` from an installed mod; mip data is stored bottom-up.
 - **KTEX alpha is premultiplied.** `tests/preview/render.py` (`decode_dxt5_block`,
@@ -352,6 +358,32 @@ documented and version-dependent.
   reported; matching filters on the seed (`carrot_seeds`), not the crop
   (`farm_plant_carrot`).
 
+## Traps
+
+- **Checking a trap is `CHECKTRAP`, not `HARVEST`.** `ACTIONS.CHECKTRAP.fn`
+  (`scripts/actions.lua:1686-1689`) calls `act.target.components.trap:Harvest(act.doer)`.
+  The `trap` component is in `scripts/components/trap.lua`.
+- **`Trap:Harvest(doer)` (`components/trap.lua:350`) is the only place the checker
+  is known.** It hands the stored loot to `doer` and then resets/re-arms the trap
+  (`Reset()` clears `lootprefabs`), so read the loot and the caught prefab *before*
+  calling it.
+- **The caught creature is not stored anywhere after spring.** `Trap:DoSpring`
+  (`:270`) writes the loot list:
+  - inventory-item targets (rabbit): `self.lootprefabs = { self.target.prefab }`
+    (`:283`), so the creature id survives in loot;
+  - lootdropper targets (spider, frog): `GenerateLoot()` (`:287-290`), i.e. the
+    **drops**, not the creature;
+  - then the target is removed.
+  A trap that springs on something untrappable has `lootprefabs == nil`; checking it
+  is not a catch.
+- `Trap:OnSave`/`OnLoad` (`:439`/`:456`) persist `loot`, which is why a sprung trap
+  still holds a catch across a save.
+- **Consequence for this mod:** `modmain.lua`'s `trap` post-init wraps `Harvest`,
+  captures `lootprefabs` before the call, and pushes `guidedmissions_trapchecked`
+  to the checker with `{ loot = <lootprefabs> }`. Objective filters match **loot
+  ids**, not the creature: rabbits store `{ "rabbit" }`, while spiders/frogs store
+  their drops.
+
 ## Recipe prototyping
 
 - **`unlockrecipe` → `{ recipe = <recipe name> }`**, pushed on the player by
@@ -404,6 +436,41 @@ documented and version-dependent.
   A mod can therefore expose console commands by assigning
   `GLOBAL.c_mycommand = function(...) ... end` in `modmain.lua`. The dictionary is
   built the first time the console screen is created, so define commands at load.
+- **Quoted arguments autocomplete from prefab names.**
+  `screens/consolescreen.lua:271-274` adds two dictionaries to the console
+  `TextEdit` (`AddWordPredictionDictionary`, `widgets/textedit.lua:652`):
+  `{ words = prefab_names, delim = '"', postfix = '"', skip_pre_delim_check = true }`
+  and the same with `'`. Command names use `delim = "c_"` / `"d_"` with
+  `num_chars = 0` (`:296-301`). A dictionary's `delim` is an arbitrary opening
+  string, `postfix` is appended when a suggestion is accepted, and
+  `num_chars = 0` shows suggestions immediately.
+- **`WordPredictor` is Lua, not engine-bound.** It is
+  `require "util/wordpredictor"` (`widgets/wordpredictionwidget.lua:8,31`;
+  `scripts/util/wordpredictor.lua`). `_find_prediction_start` scans backwards
+  from the cursor and, at each position, walks `self.dictionaries` in insertion
+  order, stopping at the **first** dictionary that yields a match
+  (`wordpredictor.lua:28-95`). Dictionaries are a plain public list
+  (`self.dictionaries = {}`, `:9`); there is no removal call, but entries can be
+  inserted or reordered directly. Consequence: a dictionary appended after the
+  vanilla prefab one never wins at the same delimiter position — for
+  `c_setmission("green`, the `"` prefab dictionary matches first and suggests
+  `green_mushroom` even if a command-scoped dictionary was also added.
+- **A long `delim` breaks quoted completion everywhere, not just its own
+  matches.** `_find_prediction_start` computes `text:sub(pos - (#dic.delim-1), pos)`
+  and, when that slice is shorter than the delimiter (`#pos_char ~= #dic.delim`
+  because `pos` is near the start of the line), it `break`s out of the whole
+  dictionary loop for that position (`wordpredictor.lua:39-44`). A dictionary
+  with, say, `delim = 'c_setmission("'` therefore disables prefab autocomplete
+  for every short command such as `c_give("...`, where the quote is closer than
+  the delimiter length to the start. Verified in-game 2026-11-12 (all console
+  autocomplete stopped until the dictionary was removed). Keep mod delimiters
+  short, or scope completion by swapping `prediction_widget.word_predictor`
+  instead of stretching `delim`.
+- **Examining dictionaries:** the list is `prediction_widget.word_predictor.dictionaries`
+  on the console's `TextEdit` after `AddClassPostConstruct("screens/consolescreen", ...)`
+  (`modutil.lua:161-164` wraps `_ctor`, and the edit widget is built inside it).
+  `AddDictionary` appends and fills `postfix`/`GetDisplayString` defaults; order
+  decides which dictionary wins at a given position.
 - An in-game admin's console starts in **remote execute** mode (Ctrl toggles;
   `ConsoleScreen:ToggleRemoteExecute`). Remote input is sent with
   `TheNet:SendRemoteExecute` and evaluated on the server by
@@ -438,9 +505,9 @@ documented and version-dependent.
 - **Declarations must be identical on the server and on every client**, for every entity.
   A mismatch fails entity deserialization. Never conditionally skip the attach step —
   not even when the local player has the tracker disabled.
-- The dirty event fires *before* the Lua update runs. In this mod all four tracker
-  strings (`title`, `subtext`, `rows`, `state`) share one dirty event so the client
-  re-renders once per state change.
+- The dirty event fires *before* the Lua update runs. In this mod all five tracker
+  strings (`title`, `subtext`, `rows`, `state`, `hint`) share one dirty event so the
+  client re-renders once per state change.
 - `scripts/netvars.lua`'s header documents the types and states that when a **mod** uses
   netvars, server and every client must have the same mod active. `net_string` is listed
   as "variable length string" with **no Lua-visible maximum**; keep payloads small
@@ -462,6 +529,54 @@ documented and version-dependent.
   region centred on the row origin, text aligned left/right within it) and
   `widgets/redux/characterbio.lua:77-89` (region equals text width, so they position at
   `left + 0.5 * width`). Getting this wrong is how a HUD label ends up half off-screen.
+- **To measure rendered text, reset the region first.** `GetRegionSize()` returns
+  whatever region was set with `SetRegionSize`, not the text extent — so measure the way
+  `Text:SetAutoSizingString` does (`widgets/text.lua:288-300`): `SetString(s)`,
+  `ResetRegionSize()`, then `GetRegionSize()`. The tracker measures the card title this
+  way so the hint button can hang immediately after the text instead of in a fixed slot.
+  **`GetRegionSize()` does not reliably report the height of a string containing
+  `\n`** (observed in-game 2026-11-12: a wrapped 3-line hint still measured as one line,
+  so a backing sized from it was too short). When you control the wrapping with
+  `SetMultilineTruncatedString`, use its **return value (the line count)** times a
+  one-line height instead.
+- **Hover text is a `Widget` method, not a separate widget.** `Widget:SetHoverText(text,
+  params)` (`widgets/widget.lua:708`) lazily builds a `hovertext_root` with a
+  `NEWFONT_OUTLINE` text at 22 (scaled 1.1×) over an `images/frontend.xml` /
+  `scribble_black.tex` backing tinted to alpha 0.8, and wraps the widget's existing
+  `OnGainFocus`/`OnLoseFocus` — so an `ImageButton` keeps its focus texture and gets the
+  tooltip. It shows at the widget's world position plus `offset_x` (default 0) and
+  `offset_y` (default **+26**, i.e. above the widget; use a negative value to hang it
+  below, as this mod's "?" button does).
+  - `params` also accepts `font`, `font_size`, `colour`, `region_w`, `region_h`,
+    `wordwrap`, `bg = false`, and `attach_to_parent`. With `attach_to_parent`, the root
+    is added as a child of that widget, positioned in its local space and
+    `MoveToFront`ed — the HUD-scale-safe form. The crafting menu uses
+    `{ offset_y = 30, attach_to_parent = self }` (`widgets/redux/craftingmenu_widget.lua:668,749`).
+  - `SetHoverText` on a widget that already has hover text **only updates the string and
+    colour** (`widget.lua:800-812`); the font, region, wordwrap and offsets are fixed at
+    creation, and the focus closure captures the params table by reference, so mutating
+    that table later still moves the tooltip. `SetHoverText("")` does nothing — use
+    `ClearHoverText()` (`widget.lua:819`) to remove it.
+  - **Word-wrapped tooltips need explicit backing sizing.** Passing `region_w` +
+    `wordwrap` sizes the dark backing from `GetRegionSize()`, which returns the *region*
+    once one is set, so the backing becomes `region_w * 1.5` wide whatever the text.
+    To keep it snug, pre-wrap the string with
+    `Text:SetMultilineTruncatedString(str, maxlines, maxwidth, nil, true)`, which inserts
+    newlines and **returns the line count**, then size the backing as
+    `width × (line_height × lines)`. Measure the one-line height before wrapping (a
+    50px BMFont has `lineHeight = 50`, so at size *s* one line is ≈ *s* px). Do **not**
+    take the height from `GetRegionSize()` after wrapping — it does not account for
+    embedded newlines (see the measurement bullet above). This mod does this in
+    `guidedmissiontracker.lua:SetHint`.
+  - **HUD widgets do receive hover focus.** `widgets/controls.lua:128` adds
+    `PlayerDeathNotification`, whose close button uses `SetHoverText`
+    (`widgets/playerdeathnotification.lua:37`), and the crafting menu lives under the
+    same `controls` widget (`controls.lua:16`). Controller input cannot focus HUD
+    widgets, so hover is **mouse-only**.
+- **The question-mark emblem** is `question.tex` / `question_over.tex` in
+  `images/skilltree.xml` (44×44, hover rim included), used as an `ImageButton` in
+  `widgets/redux/skilltreebuilder.lua:29-30,719`. The atlas is preloaded by the global
+  prefab (`prefabs/global.lua:490`), so no `Assets` entry is needed.
 - **The status badges live in the top-right, under `controls.sidepanel`.** In this
   build `widgets/controls.lua:133-135` creates
   `sidepanel = topright_root:AddChild(Widget("sidepanel"))` at `(-80, -60)`, and the
@@ -546,6 +661,17 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
 | `HEADERFONT` | `hammerhead` | Hammerhead | Redux window headers |
 | `NEWFONT_OUTLINE` | `spirequal_outline` | spirequal, **outline baked in** | tooltips/hover text |
 | `TALKINGFONT` | `talkingfont` | Belisa Plumilla Manual | character speech |
+
+- **The outline is baked into the BMFont atlas RGB, not its alpha.** A glyph is a white
+  face plus a black outline, all at alpha 255 (the `B` in `belisaplumilla50` is 152 white
+  and 724 black pixels). The engine multiplies the glyph by the `Text` colour, which
+  leaves the black outline black. Anything that re-renders these atlases —
+  `tests/preview/render.py` does — must **tint** the RGB rather than repaint from the
+  alpha channel; repainting from alpha colours the outline too and every glyph looks fat
+  and outline-less (fixed 2026-11-12).
+- `UIFONT` is registered with `adjustadvance = -2` (`scripts/fonts.lua:76`), so the
+  engine's rendered text is slightly tighter than the raw BMFont advances. Runtime
+  measurements (`GetRegionSize`) include it; the offline preview's estimate does not.
 
 - **Crafting menu typography** is the model for a HUD panel: recipe name is
   `Text(UIFONT, 30)` (`widgets/redux/craftingmenu_details.lua:342`) and the description

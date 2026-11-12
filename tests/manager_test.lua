@@ -216,7 +216,8 @@ local function Check(label, cond)
     end
 end
 
--- Split the packed row string into `{ label, prefab, counter, done }` tables.
+-- Split the packed row string into
+-- `{ label, prefab, counter, done, optional }` tables.
 local function Rows(rows)
     local out = {}
     for part in string.gmatch(rows .. ";", "([^;]*);") do
@@ -300,7 +301,9 @@ local needs_prefab = {
 -- `cook`/`cookpot` take an optional prefab (a dish filter), `prototype` takes
 -- one (a recipe id) and `plant` takes one (a seed filter); every other type
 -- either ignores the field or does not have one.
-local optional_prefab = { cook = true, cookpot = true, prototype = true, plant = true }
+local optional_prefab = {
+    cook = true, cookpot = true, prototype = true, plant = true, trap_catch = true,
+}
 
 local seen_ids = {}
 for i, mission in ipairs(RealMissions) do
@@ -315,12 +318,22 @@ for i, mission in ipairs(RealMissions) do
         type(mission.title) == "string" and #mission.title > 0)
     Check(where .. " has a subtext",
         type(mission.subtext) == "string" and #mission.subtext > 0)
+    Check(where .. " hint is text when set",
+        mission.hint == nil or (type(mission.hint) == "string" and #mission.hint > 0))
     Check(where .. " has an objective list",
         type(mission.objectives) == "table" and #mission.objectives > 0)
 
+    -- A mission whose objectives are all optional would complete the instant it
+    -- starts, so require at least one objective that gates completion.
+    local required_count = 0
     for j, objective in ipairs(mission.objectives or {}) do
         local row = string.format("%s objective %d (%s)", where, j, tostring(objective.type))
         Check(row .. " uses a known type", Objectives.VALID_TYPES[objective.type] == true)
+        Check(row .. " optional flag is a boolean",
+            objective.optional == nil or type(objective.optional) == "boolean")
+        if objective.optional ~= true then
+            required_count = required_count + 1
+        end
 
         if needs_prefab[objective.type] then
             Check(row .. " names a prefab id", IsPrefabId(objective.prefab))
@@ -344,6 +357,8 @@ for i, mission in ipairs(RealMissions) do
             Check(row .. " has a count", tonumber(objective.count) ~= nil)
         end
     end
+
+    Check(where .. " has at least one required objective", required_count > 0)
 end
 
 -- Bad mission data also breaks the real-mission render smoke below, so report
@@ -364,6 +379,7 @@ local SyntheticMissions = {
         id = "harness_first",
         title = "Harness First",
         subtext = "First synthetic mission.",
+        hint = "First synthetic hint.",
         objectives = {
             { type = "collect", prefab = "flint", count = 3, label = "Collect flint" },
         },
@@ -426,6 +442,7 @@ local state = Read()
 Check("startup state active", state["guidedmissions.state"] == "active")
 Check("startup title", state["guidedmissions.title"] == "Harness First")
 Check("startup subtext", state["guidedmissions.subtext"] == "First synthetic mission.")
+Check("startup hint", state["guidedmissions.hint"] == "First synthetic hint.")
 Check("startup rows count", #Rows(state["guidedmissions.rows"]) == 1)
 Check("startup row label", Row(inst, 1)[1] == "Collect flint")
 Check("startup row icon", Row(inst, 1)[2] == "flint")
@@ -453,6 +470,7 @@ InventoryChanged(inst)
 Check("mission won", State(inst) == "won")
 Check("won row done", Row(inst, 1)[4] == "1")
 Check("won row counter full", Row(inst, 1)[3] == "3/3")
+Check("won card drops the hint", Read()["guidedmissions.hint"] == "")
 Check("completion announced in chat",
     announcements[#announcements] == "Wilson completed: Harness First")
 Carry(inst, "twigs", 5)
@@ -464,6 +482,7 @@ local announce_count = #announcements
 Advance(3)
 Check("second mission active", State(inst) == "active")
 Check("second mission title", Read()["guidedmissions.title"] == "Harness Second")
+Check("mission without a hint clears it", Read()["guidedmissions.hint"] == "")
 Check("mission start not announced", #announcements == announce_count)
 
 -- 5. Inventory reconciliation: a pickup that stacks into an existing stack
@@ -480,6 +499,65 @@ Check("final state done", State(inst) == "done")
 Check("final title", Read()["guidedmissions.title"] == "All Missions Complete")
 Check("final subtext", Read()["guidedmissions.subtext"] == "You survived. For now.")
 Check("final rows empty", Read()["guidedmissions.rows"] == "")
+
+-- 5b. Optional objectives are tracked and flagged, but never gate completion,
+-- and an unfinished optional row keeps its real (unchecked) state on the won
+-- card instead of being forced done by the hold.
+local opt_manager, opt_player = Spawn()
+Activate(opt_manager, opt_player, {
+    id = "harness_optional",
+    title = "Harness Optional",
+    subtext = "One required, one optional.",
+    objectives = {
+        { type = "collect", prefab = "flint", count = 1, label = "Required flint" },
+        { type = "collect", prefab = "log", count = 5, label = "Optional logs", optional = true },
+    },
+})
+Check("required row is not marked optional", Row(opt_player, 1)[5] == "0")
+Check("optional row is marked", Row(opt_player, 2)[5] == "1")
+
+-- Authoring order does not matter: required rows are always emitted first so
+-- the HUD can draw one "Optional" heading above the group.
+local group_manager, group_player = Spawn()
+Activate(group_manager, group_player, {
+    id = "harness_optional_order",
+    title = "Harness Order",
+    subtext = "Optional authored first.",
+    objectives = {
+        { type = "collect", prefab = "log", count = 5, label = "Optional logs", optional = true },
+        { type = "collect", prefab = "flint", count = 1, label = "Required flint" },
+    },
+})
+Check("required row renders first", Row(group_player, 1)[1] == "Required flint")
+Check("optional row renders second", Row(group_player, 2)[1] == "Optional logs")
+Check("grouped optional row keeps its flag", Row(group_player, 2)[5] == "1")
+Carry(group_player, "flint", 1)
+InventoryChanged(group_player)
+Check("grouped row keeps its progress", Row(group_player, 1)[3] == "1/1")
+
+-- Optional progress counts as normal while the mission is active.
+Carry(opt_player, "log", 5)
+InventoryChanged(opt_player)
+Check("optional progress counts", Row(opt_player, 2)[3] == "5/5")
+Check("optional alone does not finish the mission", State(opt_player) == "active")
+
+-- Finish only the required objective on a fresh fixture.
+local gate_manager, gate_player = Spawn()
+Activate(gate_manager, gate_player, {
+    id = "harness_gate",
+    title = "Harness Gate",
+    subtext = "Optional unfinished.",
+    objectives = {
+        { type = "collect", prefab = "flint", count = 1, label = "Required flint" },
+        { type = "collect", prefab = "log", count = 5, label = "Optional logs", optional = true },
+    },
+})
+Carry(gate_player, "flint", 1)
+InventoryChanged(gate_player)
+Check("required objective completes the mission", State(gate_player) == "won")
+Check("won card checks the required row", Row(gate_player, 1)[4] == "1")
+Check("won card leaves the optional row unchecked", Row(gate_player, 2)[4] == "0")
+Check("won card still flags the optional row", Row(gate_player, 2)[5] == "1")
 
 -- 6. Save/load round trip keeps the finished chain finished.
 manager:OnLoad(manager:OnSave())
@@ -1035,6 +1113,60 @@ type_fixtures.prototype = function()
     Check("other recipes are filtered out", State(filter_player) == "active")
     filter_player:Fire("unlockrecipe", { recipe = "goldenaxe" })
     Check("targeted prototype completes", State(filter_player) == "won")
+end
+
+type_fixtures.trap_catch = function()
+    local fixture_manager, player = Spawn()
+    Activate(fixture_manager, player, {
+        id = "fixture_trap_catch",
+        title = "Trap Line",
+        subtext = "Check your traps.",
+        objectives = {
+            { type = "trap_catch", count = 2, label = "Check traps with a catch" },
+        },
+    })
+    Check("trap_catch label is rendered", Row(player, 1)[1] == "Check traps with a catch")
+    Check("trap_catch default icon is the trap", Row(player, 1)[2] == "trap")
+    Check("trap_catch starts at 0/2", Row(player, 1)[3] == "0/2")
+
+    -- The event only comes from modmain's trap hook. An unfiltered objective
+    -- does not care what the trap holds.
+    player:Fire("guidedmissions_trapchecked", { loot = { "silk" } })
+    Check("trap_catch counts a catch", Row(player, 1)[3] == "1/2")
+    player:Fire("guidedmissions_trapchecked", { loot = { "rabbit" } })
+    Check("trap_catch completes at target", State(player) == "won")
+
+    -- A prefab filter matches an entry in the trap's loot list. A rabbit trap
+    -- stores the rabbit itself, so creature filters work there.
+    local filter_manager, filter_player = Spawn()
+    Activate(filter_manager, filter_player, {
+        id = "fixture_trap_catch_one",
+        title = "Rabbit Line",
+        subtext = "Just rabbits.",
+        objectives = {
+            { type = "trap_catch", prefab = "rabbit", count = 1, label = "Catch a rabbit" },
+        },
+    })
+    Check("filtered trap_catch icon is the prefab", Row(filter_player, 1)[2] == "rabbit")
+    filter_player:Fire("guidedmissions_trapchecked", { loot = { "froglegs" } })
+    Check("other loot is filtered out", State(filter_player) == "active")
+    filter_player:Fire("guidedmissions_trapchecked", { loot = { "rabbit" } })
+    Check("matching loot completes", State(filter_player) == "won")
+
+    -- A lootdropper catch stores its drops, so multi-item loot can match any
+    -- entry: a spider trap might hold silk among other drops.
+    local loot_manager, loot_player = Spawn()
+    Activate(loot_manager, loot_player, {
+        id = "fixture_trap_catch_loot",
+        title = "Silk Line",
+        subtext = "Look for silk.",
+        objectives = {
+            { type = "trap_catch", prefab = "silk", count = 1, label = "Catch something silky" },
+        },
+    })
+    loot_player:Fire("guidedmissions_trapchecked",
+        { loot = { "monstermeat", "spidergland", "silk" } })
+    Check("any matching loot entry counts", State(loot_player) == "won")
 end
 
 -- Every VALID_TYPE must have a fixture, and no fixture may outlive its type.

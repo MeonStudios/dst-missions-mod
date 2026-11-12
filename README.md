@@ -21,6 +21,8 @@ Missions run top to bottom. Restart the server (or disable/enable the mod) after
 {
     id = "gather_wood",                       -- keep IDs stable between edits
     title = "Gather Wood",
+    subtext = "Trees are everywhere.",        -- one flavour line
+    hint = "Chop trees with an axe.",         -- optional; shown behind a "?" button
     objectives = {
         { type = "collect", prefab = "log", count = 10, label = "Collect 10 logs" },
     },
@@ -35,6 +37,7 @@ Supported objective types:
 | `craft`   | `prefab`, `count` | the player crafts `count` of an inventory item |
 | `build`   | `prefab`, `count` | the player builds `count` of a structure in the world |
 | `kill`    | `prefab`, `count` | the player kills `count` of the prefab |
+| `trap_catch` | `count`, optional `prefab` (creature filter) | the player checks `count` sprung traps that hold a catch |
 | `survive` | `day`             | the world reaches that day |
 | `chop`    | `count`           | the player fells `count` trees (any tree prefab, axe/chop action only) |
 | `eat`     | `prefab`, `count` | the player eats `count` of the food prefab |
@@ -47,6 +50,16 @@ Supported objective types:
 | `cook`    | `count`, optional `prefab` | the player cooks `count` food items on a fire |
 | `cookpot` | `count`, optional `prefab` | the player starts cooking `count` dishes in a Crock Pot (optional dish filter) |
 | `prototype` | `count`, optional `prefab` (a recipe id) | the player learns `count` new recipes (station prototyping or blueprints) |
+
+`hint` is optional: hovering the "?" button in the card's title band shows it in a
+tooltip, wrapped to the card and capped at four lines. Missions without a hint show
+no button.
+
+Any objective can be marked `optional = true`. Optional objectives are tracked like
+the others but do not block the mission, which completes when the required objectives
+are done. The card groups them below the required ones under an `Optional` heading and
+renders them dimmed; on the completion card their real state is shown, so an unfinished
+optional objective stays unchecked.
 
 The full reference — every field, default icon, and matching rule — is in
 [`docs/objectives.md`](docs/objectives.md).

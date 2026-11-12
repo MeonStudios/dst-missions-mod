@@ -155,6 +155,7 @@ Check("flower anim asset declared",
     type(env.Assets) == "table" and env.Assets[1] ~= nil
     and env.Assets[1].path == "anim/flowers.zip")
 
+
 -- ---- cooker post-init -----------------------------------------------------
 -- Fire cooking has no vanilla player event; modmain wraps Cooker:CookItem to
 -- report successful cooks. Drive the registered post-init directly.
@@ -373,6 +374,52 @@ if type(deployable_postinit) == "function" then
     local refused_planter = NewChef()
     Check("refused deploy returns false", refused:Deploy({}, refused_planter) == false)
     Check("refused deploy reports nothing", #refused_planter.events == 0)
+end
+
+-- ---- trap post-init -------------------------------------------------------
+-- The player checks a sprung trap through CHECKTRAP, which calls
+-- Trap:Harvest(doer). The objective filters on the trap's stored loot, so the
+-- wrapper reports `lootprefabs` before Harvest resets the trap. A sprung trap
+-- with no loot caught nothing.
+
+local trap_postinit = component_postinits.trap
+Check("trap post-init registered", type(trap_postinit) == "function")
+
+local function NewTrap()
+    local component = { issprung = false, lootprefabs = nil }
+    function component:Harvest()
+        self.harvested = true
+    end
+    return component
+end
+
+if type(trap_postinit) == "function" then
+    local trap = NewTrap()
+    trap_postinit(trap)
+    trap.issprung = true
+    trap.lootprefabs = { "rabbit" }
+    local doer = NewChef()
+    trap:Harvest(doer)
+    Check("trap check reports the catch",
+        #doer.events == 1 and doer.events[1].name == "guidedmissions_trapchecked")
+    Check("trapchecked event carries the loot",
+        doer.events[1] ~= nil and doer.events[1].data.loot[1] == "rabbit")
+    Check("trap check forwards the harvest behaviour", trap.harvested == true)
+
+    -- A trap that sprang on something untrappable has no loot: no report.
+    local empty = NewTrap()
+    trap_postinit(empty)
+    empty.issprung = true
+    local empty_doer = NewChef()
+    empty:Harvest(empty_doer)
+    Check("empty sprung trap reports nothing", #empty_doer.events == 0)
+
+    -- Used by a tool (no checker) must not error.
+    local tool = NewTrap()
+    trap_postinit(tool)
+    tool.issprung = true
+    tool.lootprefabs = { "froglegs" }
+    Check("trap check without a doer is safe", tool:Harvest() == nil)
 end
 
 -- ---- fake players ---------------------------------------------------------

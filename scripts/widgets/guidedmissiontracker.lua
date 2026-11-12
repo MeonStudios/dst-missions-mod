@@ -1,8 +1,8 @@
 -- Client HUD for the guided mission chain.
 --
--- Pure renderer: the server writes the four netvar strings (title, subtext,
--- rows, state) and this widget only draws them. It never sends progress back
--- and never changes game state.
+-- Pure renderer: the server writes the five netvar strings (title, subtext,
+-- rows, state, hint) and this widget only draws them. It never sends progress
+-- back and never changes game state.
 --
 -- Docking: modmain adds this widget to player.HUD.controls.topright_root, the
 -- vanilla top-right HUD scaling root. It is a plain child (no anchors or scale
@@ -25,6 +25,7 @@ local Netvars = require("guidedmissions/netvars")
 
 local CRAFTING_ATLAS = "images/crafting_menu.xml"
 local UI_ATLAS = "images/ui.xml"
+local HINT_ATLAS = "images/skilltree.xml"
 
 -- Icon ids that use a static UI texture instead of an inventory image.
 -- `brain` and `heart` are the ids the sanity and heal objectives use; the
@@ -47,6 +48,9 @@ local ICON_ANIMS = {
 
 local CARD_W = 320
 local ROW_H = 42
+-- Optional objectives are grouped below the required ones under this heading;
+-- the card grows by exactly this much when a mission has any.
+local OPTIONAL_HEADER_H = 30
 local BANNER_H = 38
 local STRIP_H = 59
 local STRIP_TITLE_MARGIN = 6
@@ -99,6 +103,23 @@ local ICON_GAP = 8        -- icon -> counter
 local CHEVRON_SIZE = 34
 local CHECK_SIZE = 24
 
+-- The optional hint button. `question.tex` / `question_over.tex` are the
+-- skill-tree's question emblem ("images/skilltree.xml", used at
+-- widgets/redux/skilltreebuilder.lua:719); the atlas is preloaded by the
+-- global prefab (prefabs/global.lua:490), so no Assets entry is needed. The
+-- icon is 44x44 art, drawn smaller to sit beside the 34px chevron.
+local HINT_BUTTON_SIZE = 26
+local HINT_BUTTON_GAP = 6
+-- The hover text hangs below the button (negative y) instead of the vanilla
+-- default above it, because the card is flush with the top of the screen.
+-- Width is capped and the text is pre-wrapped: the hover backing is drawn from
+-- the measured text extent, and an unwrapped hint would run off the HUD.
+local HINT_TOOLTIP_W = 240
+local HINT_TOOLTIP_FONT_SIZE = 20
+local HINT_TOOLTIP_MAX_LINES = 4
+local HINT_TOOLTIP_GAP = 2   -- button bottom -> tooltip backing top
+local HINT_TOOLTIP_PAD = 20  -- backing margin above and below the text
+
 local SLIDE_TIME = 0.25
 local STEP_OFFSCREEN_Y = 60
 local DONE_HIDE_DELAY = 2.5
@@ -114,6 +135,9 @@ local function MakeColumns(pad)
     local right = CARD_W / 2 - pad
     local chevron_x = right - CHEVRON_SIZE / 2
     local title_w = (chevron_x - CHEVRON_SIZE / 2 - 8) - left
+    -- A mission with a hint hangs the "?" immediately after the title, so the
+    -- title band gives up the button's width. The longest mission title is
+    -- ~176px, and this still leaves ~210px, so nothing is truncated.
     return {
         left = left,
         right = right,
@@ -121,6 +145,7 @@ local function MakeColumns(pad)
         check_x = right - CHECK_SIZE / 2,
         title_w = title_w,
         title_cx = left + title_w / 2,
+        max_hint_title_w = title_w - HINT_BUTTON_SIZE - HINT_BUTTON_GAP,
         subtext_w = right - left,
         subtext_cx = left + (right - left) / 2,
     }
@@ -206,6 +231,20 @@ local MissionTracker = Class(Widget, function(self, owner)
         "scrollbar_arrow_up_hl.tex",
         function() self:SetExpanded(false) end
     ))
+
+    -- Optional hint: a "?" between the title and the chevron. Hovering it shows
+    -- the mission's hint as a wrapped tooltip; there is no click behaviour.
+    -- Hidden whenever the current mission has no hint.
+    self.card_hint_button = self.card:AddChild(ImageButton(
+        HINT_ATLAS,
+        "question.tex",
+        "question_over.tex",
+        nil, nil, nil,
+        { 1, 1 },
+        { 0, 0 }
+    ))
+    self.card_hint_button:ForceImageSize(HINT_BUTTON_SIZE, HINT_BUTTON_SIZE)
+    self.card_hint_button:Hide()
 
     self.row_root = self.card:AddChild(Widget("guidedmission_rows"))
 
@@ -300,8 +339,9 @@ function MissionTracker:MeasureRightMargin()
     return math.max(margin, CARD_W / 2 + 8)
 end
 
-function MissionTracker:Layout(row_count)
+function MissionTracker:Layout(row_count, has_hint, title_width, has_optional)
     local h = CARD_BASE_H + ROW_H * row_count
+        + (has_optional and OPTIONAL_HEADER_H or 0)
     self.card_h = h
     local margin = self:MeasureRightMargin()
 
@@ -337,11 +377,29 @@ function MissionTracker:Layout(row_count)
     self.card_bottom:SetPosition(0, -h / 2 + BANNER_H / 2 - BOTTOM_FRAME_DROP)
 
     -- Title sits in its own band inside the frame. The chevron lives at the
-    -- right end of that band, inside the content.
-    self.card_title:SetRegionSize(COLUMNS.title_w, TITLE_H)
+    -- right end of that band, inside the content; the hint button (when the
+    -- mission has one) hangs immediately after the rendered title.
+    local title_w = COLUMNS.title_w
+    local title_cx = COLUMNS.title_cx
+    local hint_x = COLUMNS.max_hint_title_w + COLUMNS.left
+        + HINT_BUTTON_GAP + HINT_BUTTON_SIZE / 2
+    if has_hint then
+        -- `title_width` is the measured text width (see SetContent). Clamp it
+        -- to the space left by the button so a long title cannot push it into
+        -- the chevron; a failed measurement falls back to the full width.
+        local measured = title_width ~= nil and title_width > 0
+            and math.min(title_width, COLUMNS.max_hint_title_w)
+            or COLUMNS.max_hint_title_w
+        title_w = measured
+        title_cx = COLUMNS.left + measured / 2
+        hint_x = COLUMNS.left + measured + HINT_BUTTON_GAP + HINT_BUTTON_SIZE / 2
+    end
+    local title_y = top - TOP_SAFE - TITLE_H / 2
+    self.card_title:SetRegionSize(title_w, TITLE_H)
     self.card_subtext:SetRegionSize(COLUMNS.subtext_w, SUBTEXT_H)
-    self.card_title:SetPosition(COLUMNS.title_cx, top - TOP_SAFE - TITLE_H / 2)
-    self.card_chevron:SetPosition(COLUMNS.chevron_x, top - TOP_SAFE - TITLE_H / 2)
+    self.card_title:SetPosition(title_cx, title_y)
+    self.card_chevron:SetPosition(COLUMNS.chevron_x, title_y)
+    self.card_hint_button:SetPosition(hint_x, title_y)
 
     self.card_divider:SetSize(COLUMNS.subtext_w, DIVIDER_H)
     self.card_divider:SetPosition(COLUMNS.subtext_cx, -h / 2 + BOTTOM_SAFE + SUBTEXT_H + DIVIDER_GAP + DIVIDER_H / 2)
@@ -437,6 +495,9 @@ function MissionTracker:ParseRows(payload)
                 prefab = parts[2] or "",
                 counter = parts[3] or "",
                 done = parts[4] == "1",
+                -- Appended field; a payload from before optional objectives
+                -- simply has no fifth part and reads as required.
+                optional = parts[5] == "1",
             }
         end
     end
@@ -515,14 +576,33 @@ function MissionTracker:BuildRows(rows)
     self.row_widgets = {}
 
     local top = self.card_h / 2
+    -- Rows are stacked from the top; the optional heading (when present) eats
+    -- a band between the two groups, pushing every optional row down by it.
+    local y_cursor = top - TOP_SAFE - TITLE_H - TITLE_GAP
+    local optional_header_drawn = false
 
     -- Pass 1: the counter, or the check that replaces it. The icon column is
     -- sized from the widest counter so the icons line up down the card instead
     -- of hugging each row's own counter ("0/3" is narrower than "0/15").
     local plans = {}
     local counter_column_w = CHECK_SIZE
-    for i, row in ipairs(rows) do
-        local y = top - TOP_SAFE - TITLE_H - TITLE_GAP - ROW_H * (i - 0.5)
+    for _, row in ipairs(rows) do
+        if row.optional and not optional_header_drawn then
+            optional_header_drawn = true
+            y_cursor = y_cursor - OPTIONAL_HEADER_H
+
+            local header = self.row_root:AddChild(
+                Text(UIFONT, 20, "Optional", UICOLOURS.HIGHLIGHT_GOLD))
+            header:SetRegionSize(COLUMNS.subtext_w, OPTIONAL_HEADER_H)
+            header:SetHAlign(ANCHOR_LEFT)
+            header:SetVAlign(ANCHOR_MIDDLE)
+            header:SetPosition(COLUMNS.subtext_cx, y_cursor + OPTIONAL_HEADER_H / 2)
+            header:SetClickable(false)
+            self.row_widgets[#self.row_widgets + 1] = header
+        end
+
+        local y = y_cursor - ROW_H / 2
+        y_cursor = y_cursor - ROW_H
 
         local counter_w = CHECK_SIZE
         if row.done then
@@ -534,7 +614,10 @@ function MissionTracker:BuildRows(rows)
             check:SetClickable(false)
             self.row_widgets[#self.row_widgets + 1] = check
         else
-            local counter = self.row_root:AddChild(Text(BODYTEXTFONT, 24, row.counter, UICOLOURS.IVORY))
+            local counter_colour = row.optional and UICOLOURS.GOLD_UNIMPORTANT
+                or UICOLOURS.IVORY
+            local counter = self.row_root:AddChild(
+                Text(BODYTEXTFONT, 24, row.counter, counter_colour))
             counter:SetVAlign(ANCHOR_MIDDLE)
             counter_w = counter:GetRegionSize()
             counter:SetPosition(COLUMNS.right - counter_w / 2, y)
@@ -550,7 +633,8 @@ function MissionTracker:BuildRows(rows)
 
     -- Pass 2: icons and labels. Labels always start at the content edge; an
     -- icon only takes space from the right of the label, just before the
-    -- counter column.
+    -- counter column. Optional rows are dimmed rather than prefixed: the
+    -- "Optional" heading above the group carries the meaning.
     for _, plan in ipairs(plans) do
         local row, y, counter_w = plan.row, plan.y, plan.counter_w
         local has_icon = self:AddRowIcon(row.prefab, icon_x, y)
@@ -559,7 +643,8 @@ function MissionTracker:BuildRows(rows)
         local label_right = has_icon and (icon_x - ICON_SIZE / 2 - 8)
             or (COLUMNS.right - counter_w - 10)
         local label_w = label_right - label_left
-        local colour = row.done and UICOLOURS.IVORY_70 or UICOLOURS.IVORY
+        local colour = row.done and UICOLOURS.IVORY_70
+            or (row.optional and UICOLOURS.GOLD_UNIMPORTANT or UICOLOURS.IVORY)
         local label = self.row_root:AddChild(Text(UIFONT, 22, row.label, colour))
         label:SetRegionSize(label_w, ROW_H)
         label:SetHAlign(ANCHOR_LEFT)
@@ -570,11 +655,99 @@ function MissionTracker:BuildRows(rows)
     end
 end
 
+-- Show the "?" and attach the hint to it. The hover text is wrapped here
+-- rather than through SetHoverText's region/wordwrap params, because that path
+-- sizes the dark backing from the fixed region (always the full width) and the
+-- backing must stay inside the HUD. Measuring the wrapped text also lets the
+-- tooltip hang at a fixed distance below the button whatever its line count.
+function MissionTracker:SetHint(hint)
+    local button = self.card_hint_button
+
+    if hint == nil or hint == "" then
+        -- ClearFocus first: hiding a focused widget would otherwise leave its
+        -- tooltip root on screen.
+        button:ClearFocus()
+        button:ClearHoverText()
+        button:Hide()
+        return
+    end
+
+    button:Show()
+
+    if self.hint_params == nil then
+        -- One table, reused: SetHoverText's focus handler closes over it, so
+        -- updating offset_y here also moves the tooltip for later hints.
+        self.hint_params = {
+            font = NEWFONT_OUTLINE,
+            font_size = HINT_TOOLTIP_FONT_SIZE,
+            colour = { 1, 1, 1, 1 },
+            attach_to_parent = self.card,
+            offset_y = -HINT_BUTTON_SIZE / 2 - HINT_TOOLTIP_GAP,
+        }
+    end
+
+    button:SetHoverText(hint, self.hint_params)
+
+    -- SetHoverText created or updated `button.hovertext`; rewrap it in place.
+    local text = button.hovertext
+    local bg = button.hovertext_bg
+    if text == nil then
+        return
+    end
+
+    -- Measure one line's height before wrapping: GetRegionSize() does not
+    -- reliably report the height of a string with embedded newlines, so the
+    -- backing must be sized from the line count instead. (spirequal_outline is
+    -- a 50px BMFont whose lineHeight is 50, so one line is ~font_size px.)
+    local _, line_h = text:GetRegionSize()
+    if line_h == nil or line_h <= 0 then
+        line_h = HINT_TOOLTIP_FONT_SIZE
+    end
+
+    local lines = text:SetMultilineTruncatedString(
+        hint, HINT_TOOLTIP_MAX_LINES, HINT_TOOLTIP_W, nil, true)
+    lines = math.max(lines or 1, 1)
+
+    if bg ~= nil then
+        local w = text:GetRegionSize()
+        -- A stale/unsplit width would be the whole hint; cap it at the wrap
+        -- width so the backing never exceeds the card.
+        if w == nil or w <= 0 or w > HINT_TOOLTIP_W then
+            w = HINT_TOOLTIP_W
+        end
+        -- SetHoverText draws the text at 1.1x scale, so both the width and the
+        -- height must account for it. The height adds a fixed margin above and
+        -- below the text: a multiplier gives a one-line hint almost no padding.
+        local bg_w = w * 1.25
+        local bg_h = line_h * lines * 1.1 + HINT_TOOLTIP_PAD * 2
+        bg:SetSize(bg_w, bg_h)
+        self.hint_params.offset_y =
+            -(HINT_BUTTON_SIZE / 2 + HINT_TOOLTIP_GAP + bg_h / 2)
+    end
+end
+
 function MissionTracker:SetContent(state, rows)
-    self:Layout(#rows)
+    local hint = state.hint or ""
+
+    -- The "?" sits immediately after the title, so measure the rendered title
+    -- first. ResetRegionSize makes GetRegionSize return the text extent rather
+    -- than the previous layout's region; Layout sets the region again.
     self.card_title:SetString(state.title)
+    self.card_title:ResetRegionSize()
+    local title_width = self.card_title:GetRegionSize()
+
+    local has_optional = false
+    for _, row in ipairs(rows) do
+        if row.optional then
+            has_optional = true
+            break
+        end
+    end
+
+    self:Layout(#rows, hint ~= "", title_width, has_optional)
     self.strip_title:SetString(state.title)
     self.card_subtext:SetString(state.subtext or "")
+    self:SetHint(hint)
     self:BuildRows(rows)
 end
 
@@ -648,6 +821,7 @@ local function SamePayload(a, b)
         and b ~= nil
         and a.title == b.title
         and a.subtext == b.subtext
+        and a.hint == b.hint
         and a.rows == b.rows
         and a.state == b.state
 end
@@ -672,6 +846,7 @@ function MissionTracker:Refresh()
     self.last_payload = {
         title = state.title,
         subtext = state.subtext,
+        hint = state.hint,
         rows = state.rows,
         state = state.state,
     }

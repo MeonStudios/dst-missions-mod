@@ -3,9 +3,11 @@ description = "Information-only mission chains that guide players through a play
 author = "PinkNeonDino"
 version = "0.1.0"
 
--- Mods-menu icon. Both files must exist or the game clears the fields and falls
--- back to a generic portrait background (scripts/modindex.lua:542).
-icon_atlas = "modicon.xml"
+-- Mods-menu icon. `icon_atlas` is a path from the mod root; `icon` is the
+-- Element name inside that atlas (not a path — modindex.lua resolves the .tex
+-- in the atlas's directory). Both files must exist or the game clears the
+-- fields and falls back to a generic portrait background (scripts/modindex.lua:542).
+icon_atlas = "icon/modicon.xml"
 icon = "modicon.tex"
 
 -- Don't Starve Together mod API version.

@@ -13,8 +13,9 @@ Usage:
     python tools/make_modicon.py [--game-data DIR] [--prefab book_research_station]
 
 The `.tex` header and mip layout were copied from a known-good ktech file, so the
-output is accepted by `scripts/modindex.lua` icon loading. `modicon.xml` is static
-and already checked in.
+output is accepted by `scripts/modindex.lua` icon loading. Output goes to the
+`icon/` folder next to the static, checked-in `modicon.xml`; `modinfo.lua` points
+at it as `icon_atlas = "icon/modicon.xml"`.
 """
 
 import argparse
@@ -26,6 +27,7 @@ from PIL import Image
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
+ICON_DIR = os.path.join(ROOT, "icon")
 sys.path.insert(0, os.path.join(ROOT, "tests", "preview"))
 
 import render  # noqa: E402  (path set above)
@@ -137,7 +139,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--game-data", default=os.environ.get("DST_DATA", DEFAULT_GAME_DATA))
     parser.add_argument("--prefab", default="book_research_station")
-    parser.add_argument("--out", default=ROOT)
+    parser.add_argument("--out", default=ICON_DIR)
     args = parser.parse_args()
 
     game = render.GameData(args.game_data)

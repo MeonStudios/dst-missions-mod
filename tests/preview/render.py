@@ -29,6 +29,7 @@ MOD_ROOT = os.path.abspath(os.path.join(HERE, "..", ".."))
 FONT_FILES = {
     "belisaplumilla50": "fonts/belisaplumilla50.zip",
     "stint-ucr50": "fonts/stint-ucr50.zip",
+    "spirequal_outline": "fonts/spirequal_outline.zip",
 }
 
 BG_COLOUR = (42, 33, 24, 255)
@@ -308,48 +309,71 @@ class Renderer:
         if scale == 0:
             return
         line_h = font["line_height"] * scale
-        total_w = sum(font["chars"].get(ord(c), {}).get("xa", 0) for c in text) * scale
+        # DST Text honours embedded newlines; the hint tooltip is wrapped by the
+        # tracker into such a string. Align and centre the block as a whole.
+        lines = text.split("\n")
+        line_widths = [
+            sum(font["chars"].get(ord(c), {}).get("xa", 0) for c in line) * scale
+            for line in lines
+        ]
+        total_w = max(line_widths) if line_widths else 0
+        total_h = line_h * len(lines)
         region_w = node.get("region_w") or total_w
-        region_h = node.get("region_h") or line_h
+        region_h = node.get("region_h") or total_h
         halign = node.get("halign", 0)
         valign = node.get("valign", 0)
 
-        if halign == 1:       # ANCHOR_LEFT
-            pen = x - region_w / 2
-        elif halign == 2:     # ANCHOR_RIGHT
-            pen = x + region_w / 2 - total_w
-        else:                 # centre
-            pen = x - total_w / 2
-
         region_top = y + region_h / 2
         if valign == 1:       # TOP
-            line_top = region_top
+            block_top = region_top
         elif valign == 2:     # BOTTOM
-            line_top = region_top - region_h + line_h
-        else:
-            line_top = region_top - (region_h - line_h) / 2
+            block_top = region_top - region_h + total_h
+        else:                 # centre the whole block
+            block_top = region_top - (region_h - total_h) / 2
 
         colour = node.get("colour", [1, 1, 1, 1])
         cr, cg, cb = (int(colour[0] * 255), int(colour[1] * 255), int(colour[2] * 255))
         ca = colour[3] if len(colour) > 3 else 1
-        for ch in text:
-            glyph = font["chars"].get(ord(ch))
-            if glyph is None:
-                continue
-            gw = max(1, int(round(glyph["w"] * scale * self.S)))
-            gh = max(1, int(round(glyph["h"] * scale * self.S)))
-            if glyph["w"] > 0 and glyph["h"] > 0:
-                crop = font["image"].crop(
-                    (glyph["x"], glyph["y"], glyph["x"] + glyph["w"], glyph["y"] + glyph["h"])
-                ).resize((gw, gh), RESAMPLE)
-                glyph_alpha = crop.split()[3].point(lambda v: int(v * ca))
-                tile = Image.new("RGBA", (gw, gh), (cr, cg, cb, 255))
-                tile.putalpha(glyph_alpha)
-                gx_center = pen + (glyph["xo"] + glyph["w"] / 2) * scale
-                gy_center = line_top - (glyph["yo"] + glyph["h"] / 2) * scale
-                cxp, cyp = self.to_px(gx_center, gy_center)
-                self.paste_clipped(tile, cxp - gw / 2, cyp - gh / 2, clip)
-            pen += glyph["xa"] * scale
+        for line_index, line in enumerate(lines):
+            if halign == 1:       # ANCHOR_LEFT
+                pen = x - region_w / 2
+            elif halign == 2:     # ANCHOR_RIGHT
+                pen = x + region_w / 2 - line_widths[line_index]
+            else:                 # centre each line
+                pen = x - line_widths[line_index] / 2
+            line_top = block_top - line_index * line_h
+
+            for ch in line:
+                glyph = font["chars"].get(ord(ch))
+                if glyph is None:
+                    continue
+                gw = max(1, int(round(glyph["w"] * scale * self.S)))
+                gh = max(1, int(round(glyph["h"] * scale * self.S)))
+                if glyph["w"] > 0 and glyph["h"] > 0:
+                    crop = font["image"].crop(
+                        (glyph["x"], glyph["y"], glyph["x"] + glyph["w"], glyph["y"] + glyph["h"])
+                    ).resize((gw, gh), RESAMPLE).convert("RGBA")
+                    # The BMFont atlases bake the outline into the RGB channels:
+                    # a white glyph face, a black outline, opaque alpha. Tint the
+                    # glyph (multiply by the text colour) as the engine does, so
+                    # black stays black. Repainting from the alpha channel alone
+                    # would colour the outline too and lose it (letters look fat).
+                    ca_i = ca
+                    tile = Image.new("RGBA", (gw, gh))
+                    tile.putdata([
+                        (
+                            r * cr // 255,
+                            g * cg // 255,
+                            b * cb // 255,
+                            int(a * ca_i),
+                        )
+                        for (r, g, b, a) in crop.getdata()
+                    ])
+                    gx_center = pen + (glyph["xo"] + glyph["w"] / 2) * scale
+                    gy_center = line_top - (glyph["yo"] + glyph["h"] / 2) * scale
+                    cxp, cyp = self.to_px(gx_center, gy_center)
+                    self.paste_clipped(tile, cxp - gw / 2, cyp - gh / 2, clip)
+                pen += glyph["xa"] * scale
 
     def draw(self, node, px, py, psx, psy, clip):
         if not node.get("shown", True):

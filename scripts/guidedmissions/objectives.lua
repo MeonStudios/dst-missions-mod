@@ -20,6 +20,12 @@ function Objectives.GetLabel(objective)
     return objective.label
 end
 
+-- Optional objectives are tracked and rendered like any other, but never block
+-- mission completion (`optional = true` in mission data).
+function Objectives.IsOptional(objective)
+    return objective.optional == true
+end
+
 -- The pre-formatted counter shown on the right of a tracker row.
 function Objectives.GetCounter(objective, progress)
     if objective.type == "survive" then
@@ -84,6 +90,11 @@ function Objectives.GetIconPrefab(objective)
         -- prefab id); "any recipe" falls back to the blueprint item. An
         -- explicit `icon` wins over both.
         return objective.icon or objective.prefab or "blueprint"
+    end
+    if objective.type == "trap_catch" then
+        -- The trapped creature's icon when filtered (`rabbit`, `spider`,
+        -- `frog`, ...); an unfiltered objective falls back to the trap item.
+        return objective.prefab or "trap"
     end
 
     if objective.type == "collect" or objective.type == "craft"
@@ -373,6 +384,22 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
             and (objective.prefab == nil or data.recipe == objective.prefab) then
             return 1
         end
+    elseif event == "guidedmissions_trapchecked" then
+        -- Pushed by modmain's `trap` post-init when the player checks a sprung
+        -- trap that holds a catch. `loot` is the trap's stored loot list: an
+        -- inventory-item catch (rabbit) stores the creature itself, while
+        -- lootdropper catches (spider, frog) store their drops, so a `prefab`
+        -- filter matches loot ids, not necessarily the creature.
+        if objective.type == "trap_catch" then
+            if objective.prefab == nil then
+                return 1
+            end
+            for _, prefab in ipairs(data.loot or {}) do
+                if prefab == objective.prefab then
+                    return 1
+                end
+            end
+        end
     end
 
     return 0
@@ -399,6 +426,7 @@ Objectives.VALID_TYPES = {
     cook = true,
     cookpot = true,
     prototype = true,
+    trap_catch = true,
 }
 
 return Objectives

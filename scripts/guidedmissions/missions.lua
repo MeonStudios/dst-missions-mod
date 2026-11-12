@@ -8,6 +8,7 @@
 --   craft:        prefab, count              -> craft `count` inventory items
 --   build:        prefab, count              -> place `count` structures
 --   kill:         prefab, count              -> kill `count` of `prefab`
+--   trap_catch:   count, prefab?             -> check `count` sprung traps with a catch
 --   survive:      day                        -> reach this absolute world day
 --   chop:         count                      -> fell `count` trees
 --   mine:         count                      -> finish mining `count` nodes
@@ -30,7 +31,13 @@
 -- `label` is required and carries no count: the tracker renders the counter
 -- separately (for example "Collect logs" with "0/10" beside it). `title` and
 -- `subtext` are required too: `subtext` is one flavour line, 45 characters max,
--- shown under the objectives.
+-- shown under the objectives. `hint` is optional: a sentence or two shown as a
+-- hover tooltip behind the "?" button; the HUD wraps it and caps it at 4 lines.
+--
+-- Any objective may set `optional = true`. Optional objectives are tracked like
+-- the rest but never gate completion. The card groups them below the required
+-- objectives under an "Optional" heading and dims them. Each mission needs at
+-- least one required objective.
 --
 -- Missions are informational only: completing one gives no items or other
 -- in-game benefit.
@@ -44,12 +51,14 @@ return {
             { type = "collect", prefab = "flint", count = 3, label = "Collect flint" },
             { type = "collect", prefab = "twigs", count = 10, label = "Collect twigs" },
             { type = "collect", prefab = "cutgrass", count = 10, label = "Collect grass" },
+            { type = "pick", prefab = "flower", count = 1, label = "Pick a flower", optional = true },
         },
     },
     {
         id = "basic_tools",
         title = "Tools of the Trade",
         subtext = "Your hands weren't built for chopping trees.",
+        hint = "Use the crafting menu on the left.",
         objectives = {
             { type = "craft", prefab = "pickaxe", count = 1, label = "Craft a pickaxe" },
             { type = "craft", prefab = "axe", count = 1, label = "Craft an axe" },
@@ -68,6 +77,7 @@ return {
         id = "first_night",
         title = "Let There Be Light",
         subtext = "The dark is not your friend. Probably.",
+        hint = "One torch does not last the whole night.",
         objectives = {
             { type = "craft", prefab = "torch", count = 1, label = "Craft a torch" },
             { type = "build", prefab = "campfire", count = 1, label = "Build a campfire" },
@@ -78,6 +88,7 @@ return {
         id = "eat_food",
         title = "Food for Thought",
         subtext = "Veggies: now with 100% more fire.",
+        hint = "Berries, carrots and mushrooms count as veggies.",
         objectives = {
             { type = "collect_food", foodtype = "VEGGIE", count = 5, label = "Collect veggies" },
             { type = "cook", count = 2, label = "Cook items" },
@@ -87,6 +98,7 @@ return {
         id = "restore_health",
         title = "An Apple a Day...",
         subtext = "Things will hurt you. Learn how to fix that.",
+        hint = "Kill butterflies by standing on them and use the force attack keybind (Ctrl + F)",
         objectives = {
             { type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing" },
             { type = "heal", count = 10, label = "Restore at least 10 health" },
@@ -105,6 +117,7 @@ return {
         id = "collect_rocks",
         title = "Rock Solid Plan",
         subtext = "Hit things until they become useful.",
+        hint = "Boulders with gold veins drop gold nuggets, found in rocky biomes",
         objectives = {
             { type = "mine", count = 3, label = "Mine boulders" },
             { type = "collect", prefab = "goldnugget", count = 1, label = "Collect a gold nugget" },
@@ -114,6 +127,7 @@ return {
         id = "science_machine",
         title = "Stience!",
         subtext = "Time to use your questionable intelligence.",
+        hint = "Crafting a new recipe prototypes it and restores 15 sanity.",
         objectives = {
             { type = "build", prefab = "researchlab", count = 1, label = "Build a Science Machine" },
             { type = "prototype", count = 2, label = "Prototype recipes" },
@@ -123,6 +137,7 @@ return {
         id = "protection",
         title = "A Little Protection",
         subtext = "Running away works. Insurance is nice too.",
+        hint = "Armor reduces the damage taken.",
         objectives = {
             { type = "craft", prefab = "armorwood", count = 1, label = "Craft a Log Suit" },
             { type = "craft", prefab = "spear", count = 1, label = "Craft a Spear" },
@@ -149,6 +164,7 @@ return {
         id = "food_build",
         title = "The Kitchen Experiment",
         subtext = "A pot, a rack, and questionable recipes.",
+        hint = "Both need charcoal: burn a tree, then chop the burnt remains.",
         objectives = {
             { type = "build", prefab = "cookpot", count = 1, label = "Build a Crock Pot" },
             { type = "build", prefab = "meatrack", count = 1, label = "Build a Drying Rack" },
@@ -159,14 +175,17 @@ return {
         id = "find_meat",
         title = "Where's the Beef?",
         subtext = "Something out there must be edible.",
+        hint = "Set traps, lure moleworms with flint, or hunt creatures.",
         objectives = {
             { type = "collect_food", foodtype = "MEAT", count = 2, label = "Collect meat" },
+            { type = "trap_catch", count = 1, label = "Catch something in a trap", optional = true },
         },
     },
     {
         id = "make_meatballs",
         title = "Juicy Meatballs",
-        subtext = "Meat plus three fillers. Hide the evidence.",
+        subtext = "Mystery meat, now in convenient sphere form.",
+        hint = "One meat plus three fillers (berries, carrots, mushrooms) makes meatballs.",
         objectives = {
             { type = "cookpot", prefab = "meatballs", count = 1, label = "Cook meatballs" },
         },
@@ -175,6 +194,7 @@ return {
         id = "green_thumb",
         title = "Green Thumb",
         subtext = "Dirt, seeds, patience. Mostly patience.",
+        hint = "Gather seeds by chasing away birds.",
         objectives = {
             { type = "craft", prefab = "farm_plow_item", count = 1, label = "Craft a Garden Digamajig" },
             { type = "craft", prefab = "farm_hoe", count = 1, label = "Craft a Garden Hoe" },
@@ -194,6 +214,7 @@ return {
         id = "warm_thoughts",
         title = "Warm Thoughts",
         subtext = "Hot rocks: the best winter pocket warmers.",
+        hint = "Heat a Thermal Stone by a fire to keep you warm during winter.",
         objectives = {
             { type = "craft", prefab = "heatrock", count = 1, label = "Craft a Thermal Stone" },
             { type = "collect", prefab = "smallmeat_dried", count = 2, label = "Dry meat into jerky"},
@@ -203,6 +224,7 @@ return {
         id = "preparing",
         title = "Preparing for the Long Haul",
         subtext = "Winter doesn't wait for you to unpack.",
+        hint = "Winter slows regrowth: stockpile logs, grass and twigs before it arrives.",
         objectives = {
             { type = "collect", prefab = "log", count = 20, label = "Collect logs" },
             { type = "collect", prefab = "twigs", count = 30, label = "Collect twigs" },

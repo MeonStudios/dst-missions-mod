@@ -26,25 +26,36 @@ local function HasSurviveObjective(mission)
     return false
 end
 
--- Rows are `label|prefab|counter|done` joined by `;`, so the separators must
--- never appear inside the free-form label.
+-- Rows are `label|prefab|counter|done|optional` joined by `;`, so the
+-- separators must never appear inside the free-form label.
 local function SanitiseLabel(text)
     return (tostring(text):gsub("[|;]", " "))
 end
 
--- Pack the mission's objectives into the client's row format. `force_done`
--- renders every row as complete for the 3-second completion hold.
+-- Pack the mission's objectives into the client's row format. Required rows
+-- are emitted before optional ones regardless of authoring order, so the HUD
+-- can draw one "Optional" heading above the second group. `force_done` renders
+-- the required rows as complete for the 3-second completion hold; optional
+-- rows keep their real state so an unfinished one never shows a check.
 local function FormatRows(mission, progress, force_done)
     local rows = {}
-    for i, objective in ipairs(mission.objectives or {}) do
-        local value = progress[i] or 0
-        local done = (force_done or Objectives.IsComplete(objective, value)) and 1 or 0
-        rows[#rows + 1] = table.concat({
-            SanitiseLabel(Objectives.GetLabel(objective)),
-            Objectives.GetIconPrefab(objective) or "",
-            Objectives.GetCounter(objective, value),
-            tostring(done),
-        }, "|")
+    for pass = 1, 2 do
+        local want_optional = pass == 2
+        for i, objective in ipairs(mission.objectives or {}) do
+            local optional = Objectives.IsOptional(objective)
+            if optional == want_optional then
+                local value = progress[i] or 0
+                local done = ((force_done and not optional)
+                    or Objectives.IsComplete(objective, value)) and 1 or 0
+                rows[#rows + 1] = table.concat({
+                    SanitiseLabel(Objectives.GetLabel(objective)),
+                    Objectives.GetIconPrefab(objective) or "",
+                    Objectives.GetCounter(objective, value),
+                    tostring(done),
+                    optional and "1" or "0",
+                }, "|")
+            end
+        end
     end
     return table.concat(rows, ";")
 end
@@ -123,6 +134,11 @@ local GuidedMissionManager = Class(function(self, inst)
     end)
     inst:ListenForEvent("guidedmissions_plantedseed", function(_, data)
         self:OnObjectiveEvent("guidedmissions_plantedseed", data)
+    end)
+    -- Pushed by modmain's `trap` post-init when the player checks a sprung trap
+    -- that holds a catch (`data.loot` is the trap's loot prefab list).
+    inst:ListenForEvent("guidedmissions_trapchecked", function(_, data)
+        self:OnObjectiveEvent("guidedmissions_trapchecked", data)
     end)
     inst:ListenForEvent("unlockrecipe", function(_, data)
         self:OnUnlockRecipe(data)
@@ -378,7 +394,9 @@ function GuidedMissionManager:CheckCompletion()
     end
 
     for i, objective in ipairs(mission.objectives or {}) do
-        if not Objectives.IsComplete(objective, self.progress[i] or 0) then
+        -- Optional objectives are tracked but never gate completion.
+        if not Objectives.IsOptional(objective)
+            and not Objectives.IsComplete(objective, self.progress[i] or 0) then
             return
         end
     end
@@ -397,6 +415,9 @@ function GuidedMissionManager:CompleteCurrentMission()
     Netvars.Write(self.inst, {
         title = mission.title,
         subtext = mission.subtext or "",
+        -- No hint on the completion card: every row is checked and the helper
+        -- button would only clutter the 3-second hold.
+        hint = "",
         rows = FormatRows(mission, self.progress, true),
         state = "won",
     })
@@ -430,6 +451,7 @@ function GuidedMissionManager:Sync()
         Netvars.Write(self.inst, {
             title = "All Missions Complete",
             subtext = "You survived. For now.",
+            hint = "",
             rows = "",
             state = "done",
         })
@@ -444,6 +466,9 @@ function GuidedMissionManager:Sync()
     Netvars.Write(self.inst, {
         title = mission.title,
         subtext = mission.subtext or "",
+        -- Optional per-mission hint, shown by the tracker behind a hover on the
+        -- "?" button. Absent (nil) is written as "" so the button hides.
+        hint = mission.hint or "",
         rows = FormatRows(mission, self.progress, false),
         state = "active",
     })

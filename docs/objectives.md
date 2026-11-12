@@ -16,10 +16,13 @@ place that needs touching.
     id = "first_night",                               -- unique, stable, lowercase
     title = "Let There Be Light",                     -- card heading
     subtext = "The dark is not your friend. Probably.", -- one flavour line, ~45 chars
+    hint = "A torch goes in your hand, a campfire on the ground.", -- optional
     objectives = {
         { type = "craft", prefab = "torch", count = 1, label = "Craft a torch" },
         { type = "build", prefab = "campfire", count = 1, label = "Build a campfire" },
         { type = "survive", day = 2, label = "Survive the first night" },
+        { type = "pick", prefab = "flower", count = 1, label = "Pick a flower",
+          optional = true },                              -- does not block completion
     },
 }
 ```
@@ -29,7 +32,18 @@ place that needs touching.
 | `id` | yes | Unique, stable, lowercase `[a-z0-9_]`. Saved progress is keyed by id, not by position, so reordering missions is safe but renaming an id resets that mission's players. |
 | `title` | yes | Shown as the card heading. |
 | `subtext` | yes | One flavour line under the objectives. Keep it to about 45 characters; the card has a single line. |
-| `objectives` | yes | At least one. The mission completes when **all** rows complete. |
+| `hint` | no | A sentence or two of help, shown in a hover tooltip behind a "?" button in the card's title band. The HUD wraps it to 240 px and caps it at 4 lines (with an ellipsis), so keep it short. Omit it and no button appears. The hint is not shown on the 3-second completion card. |
+| `objectives` | yes | At least one required objective (see below). The mission completes when **all required** rows complete. |
+
+Any objective may set `optional = true`. Optional objectives are tracked and counted
+exactly like required ones, but they never gate completion: a mission finishes as soon
+as its required objectives are done, and optional rows that are still unfinished stay
+unchecked on the completion card (the 3-second hold only forces the required rows to
+"done"). The tracker always renders required rows first and groups optional rows below
+them under a small gold `Optional` heading, with the optional labels and counters
+dimmed; authored order is kept within each group. Every mission must have at least one
+required objective; a mission of only optional objectives would complete the moment it
+starts.
 
 Missions run in file order. Each player advances independently after a 3-second
 "won" hold. The last mission is followed by a terminal "All Missions Complete" card.
@@ -49,8 +63,10 @@ There are three mechanisms:
 - **Event-driven:** everything else. Each event adds an increment (usually 1, but
   `heal`/`sanity` add points).
 
-Rows render as `label`, icon, `progress/count`, and a green check when done. A
-completed mission shows every row checked during the hold.
+Rows render as `label`, icon, `progress/count`, and a green check when done. Optional
+rows sit in their own group below an `Optional` heading and use a dimmer colour. During
+the completion hold the required rows are shown checked; optional rows show their real
+state, so an unfinished optional objective is visibly left unchecked.
 
 ## Icons
 
@@ -152,6 +168,35 @@ Kill `count` creatures.
 
 ```lua
 { type = "kill", prefab = "spider", count = 5, label = "Kill spiders" }
+```
+
+### `trap_catch`
+
+Check `count` traps that hold a catch.
+
+| Field | Required | Default |
+|---|---|---|
+| `prefab` | no | any catch |
+| `count` | yes | — |
+
+- **Completes when:** the player checks a sprung trap that actually caught
+  something, `count` times. A sprung trap that caught nothing (it disarmed
+  safely, or the catch was already removed) does not count, and the objective
+  counts the player's **checks**, not the moment the trap springs.
+- **Trigger:** the `guidedmissions_trapchecked` player event, pushed by
+  `modmain.lua`'s `trap` post-init from `Trap:Harvest(doer)` (the CHECKTRAP
+  action). The payload is `{ loot = <the trap's loot prefabs> }`.
+- **Matching:** `prefab` is compared against the trap's **loot**, not the
+  creature. An inventory-item catch stores the creature itself, so
+  `prefab = "rabbit"` works; a lootdropper catch stores its drops, so filter
+  the drop instead (`froglegs` for a frog, `silk`/`monstermeat` for a spider).
+  Without `prefab`, any catch counts.
+- **Icon:** `prefab` when set, otherwise the `trap` item.
+
+```lua
+{ type = "trap_catch", prefab = "rabbit", count = 3, label = "Catch rabbits" }
+{ type = "trap_catch", prefab = "froglegs", count = 2, label = "Trap frogs" }
+{ type = "trap_catch", count = 1, label = "Check a trap with a catch" }
 ```
 
 ### `survive`
@@ -464,11 +509,13 @@ Learn `count` new recipes.
 | `cookpot` | `guidedmissions_stewedfood` (mod pushed) | `product` (a string) |
 | `prototype` | `unlockrecipe` | `data.recipe` matched to objective `prefab` (a recipe id), deduplicated |
 | `plant` | `guidedmissions_plantedseed` (mod pushed) | `seed` (a prefab id string) |
+| `trap_catch` | `guidedmissions_trapchecked` (mod pushed) | objective `prefab` matched against any entry in `data.loot` |
 
-`cookedfood`/`stewedfood`/`plantedseed` exist because vanilla fire cooking, Crock Pot
-cooking and seed planting emit no player event; `modmain.lua` post-inits the `cooker`,
-`stewer`, `farmplantable` and `deployable` components to report them. See
-`docs/dst-api.md` for the verified engine behavior behind each row.
+`cookedfood`/`stewedfood`/`plantedseed`/`trapchecked` exist because vanilla fire
+cooking, Crock Pot cooking, seed planting and trap checking emit no player event;
+`modmain.lua` post-inits the `cooker`, `stewer`, `farmplantable`, `deployable` and
+`trap` components to report them. See `docs/dst-api.md` for the verified engine
+behavior behind each row.
 
 ## Adding or changing an objective type
 

@@ -126,7 +126,7 @@ elevated prompt. It only helps this machine; other players need their own copy.
   sh tests/preview/run.sh
   ```
 
-  Outputs `tests/preview/out/{active_2row,sanity_2row,heal_2row,active_1row,won,done,collapsed}.png`. Requires
+  Outputs `tests/preview/out/{active_2row,hint_2row,hint_open,trap_1row,optional_3row,sanity_2row,heal_2row,active_1row,won,done,collapsed}.png`. Requires
   Pillow (`pip install pillow`). The game data path defaults to the Steam install and is
   overridable with `--game-data` or `DST_DATA`. Because it records the real widget, layout
   changes show up without duplicating constants. It does not exercise input, netvars, or
