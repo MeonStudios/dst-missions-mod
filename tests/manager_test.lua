@@ -302,11 +302,13 @@ local needs_prefab = {
     collect = true, craft = true, build = true, kill = true, eat = true, pick = true,
 }
 -- `cook`/`cookpot` take an optional prefab (a dish filter), `prototype` takes
--- one (a recipe id) and `plant` takes one (a seed filter); every other type
--- either ignores the field or does not have one.
+-- one (a recipe id), `plant` takes one (a seed filter), `trap_catch` takes one
+-- (a loot filter), `sleep` takes one (a bed filter) and `fertilize` takes one
+-- (a plant filter); every other type either ignores the field or does not have
+-- one.
 local optional_prefab = {
     cook = true, cookpot = true, prototype = true, plant = true, trap_catch = true,
-    sleep = true,
+    sleep = true, fertilize = true,
 }
 
 -- Shared by chain and emergency validation. Returns `optional == true` so the
@@ -1451,20 +1453,23 @@ type_fixtures.plant = function()
         title = "Green Thumb",
         subtext = "Dirt and patience.",
         objectives = {
-            { type = "plant", count = 2, label = "Plant seeds" },
+            { type = "plant", count = 2, label = "Plant something" },
         },
     })
-    Check("plant label is rendered", Row(player, 1)[1] == "Plant seeds")
+    Check("plant label is rendered", Row(player, 1)[1] == "Plant something")
     Check("plant default icon is the generic seed", Row(player, 1)[2] == "seeds")
 
-    player:Fire("guidedmissions_plantedseed")
-    Check("data-less plantedseed is ignored", Row(player, 1)[3] == "0/2")
-    player:Fire("guidedmissions_plantedseed", { seed = "carrot_seeds" })
+    player:Fire("guidedmissions_planted")
+    Check("data-less planted event is ignored", Row(player, 1)[3] == "0/2")
+    player:Fire("guidedmissions_planted", { item = "carrot_seeds" })
     Check("planting any seed counts", Row(player, 1)[3] == "1/2")
-    player:Fire("guidedmissions_plantedseed", { seed = "seeds" })
-    Check("plant completes at target", State(player) == "won")
+    -- Dug plants deploy through a different engine path but are the same
+    -- intent, so they feed the same objective (the held item, not the plant).
+    player:Fire("guidedmissions_planted", { item = "dug_berrybush" })
+    Check("replanting a dug bush completes", State(player) == "won")
 
-    -- Optional prefab filters on the seed the player planted.
+    -- Optional prefab filters on the item the player planted: a seed id for
+    -- tilled soil, a `dug_` id for a deploy.
     local filter_manager, filter_player = Spawn()
     Activate(filter_manager, filter_player, {
         id = "fixture_plant_filter",
@@ -1476,10 +1481,25 @@ type_fixtures.plant = function()
     })
     Check("targeted plant label is rendered", Row(filter_player, 1)[1] == "Plant carrot seeds")
     Check("targeted plant icon is the seed", Row(filter_player, 1)[2] == "carrot_seeds")
-    filter_player:Fire("guidedmissions_plantedseed", { seed = "pumpkin_seeds" })
+    filter_player:Fire("guidedmissions_planted", { item = "pumpkin_seeds" })
     Check("other seeds are filtered out", State(filter_player) == "active")
-    filter_player:Fire("guidedmissions_plantedseed", { seed = "carrot_seeds" })
+    filter_player:Fire("guidedmissions_planted", { item = "carrot_seeds" })
     Check("targeted plant completes", State(filter_player) == "won")
+
+    -- A dug plant filter names the dug item, not the bush it becomes.
+    local dug_manager, dug_player = Spawn()
+    Activate(dug_manager, dug_player, {
+        id = "fixture_plant_dug",
+        title = "Relocation",
+        subtext = "Bushes travel well.",
+        objectives = {
+            { type = "plant", prefab = "dug_berrybush", count = 1, label = "Replant a berry bush" },
+        },
+    })
+    dug_player:Fire("guidedmissions_planted", { item = "dug_sapling" })
+    Check("another dug plant is filtered out", State(dug_player) == "active")
+    dug_player:Fire("guidedmissions_planted", { item = "dug_berrybush" })
+    Check("the filtered dug plant completes", State(dug_player) == "won")
 end
 
 type_fixtures.cook = function()
@@ -1655,6 +1675,59 @@ type_fixtures.trap_catch = function()
     loot_player:Fire("guidedmissions_trapchecked",
         { loot = { "monstermeat", "spidergland", "silk" } })
     Check("any matching loot entry counts", State(loot_player) == "won")
+end
+
+type_fixtures.fertilize = function()
+    local fixture_manager, player = Spawn()
+    Activate(fixture_manager, player, {
+        id = "fixture_fertilize",
+        title = "Green Thumb",
+        subtext = "Feed the plants.",
+        objectives = {
+            { type = "fertilize", count = 2, label = "Fertilize plants" },
+        },
+    })
+    Check("fertilize label is rendered", Row(player, 1)[1] == "Fertilize plants")
+    Check("fertilize default icon is rot", Row(player, 1)[2] == "rot")
+    Check("fertilize starts at 0/2", Row(player, 1)[3] == "0/2")
+
+    -- The event only comes from modmain's pickable hook. An unfiltered row
+    -- counts any fertilizer on any plant.
+    player:Fire("guidedmissions_fertilized", { plant = { prefab = "grass" } })
+    Check("fertilize counts a plant", Row(player, 1)[3] == "1/2")
+    player:Fire("guidedmissions_fertilized", { plant = { prefab = "berrybush" } })
+    Check("fertilize completes at target", State(player) == "won")
+
+    -- A prefab filter matches the fertilized plant, not the fertilizer.
+    local filter_manager, filter_player = Spawn()
+    Activate(filter_manager, filter_player, {
+        id = "fixture_fertilize_one",
+        title = "Bush Feed",
+        subtext = "Just the bushes.",
+        objectives = {
+            { type = "fertilize", prefab = "berrybush", count = 1,
+              label = "Fertilize a berry bush" },
+        },
+    })
+    Check("filtered fertilize icon is the plant", Row(filter_player, 1)[2] == "berrybush")
+    filter_player:Fire("guidedmissions_fertilized",
+        { plant = { prefab = "berrybush_juicy" } })
+    Check("another plant is filtered out", State(filter_player) == "active")
+    filter_player:Fire("guidedmissions_fertilized", { plant = { prefab = "berrybush" } })
+    Check("the filtered plant completes", State(filter_player) == "won")
+
+    -- An explicit icon wins over the plant's (plants have no inventory art).
+    local icon_manager, icon_player = Spawn()
+    Activate(icon_manager, icon_player, {
+        id = "fixture_fertilize_icon",
+        title = "Berries",
+        subtext = "Bush duty.",
+        objectives = {
+            { type = "fertilize", prefab = "berrybush", count = 1,
+              icon = "berries", label = "Fertilize a berry bush" },
+        },
+    })
+    Check("fertilize icon override wins", Row(icon_player, 1)[2] == "berries")
 end
 
 -- Every VALID_TYPE must have a fixture, and no fixture may outlive its type.

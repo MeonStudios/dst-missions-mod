@@ -73,10 +73,16 @@ local FILL_INSET = 16
 -- The distance from the screen edge is measured at layout time from the
 -- badges themselves (see MeasureRightMargin), so a mod that moves or enlarges
 -- them -- Combined Status does both -- is followed automatically.
-local DEFAULT_RIGHT_MARGIN = 190  -- used when the status display cannot be read
-local STATUS_GAP = 20             -- gap between the card and the nearest badge
+local DEFAULT_RIGHT_MARGIN = 200  -- used when the status display cannot be read
+local STATUS_GAP = 30             -- gap between the card and the nearest badge
 local BADGE_HALF_W = 48           -- half the width of a status badge
 local MARGIN_TOP = 4
+-- The card docks at the measured margin by default, but each player can drag
+-- it left or right with the mouse. The offset is saved per account in
+-- client_save. Coordinates are the dock root's local space: x = 0 is the
+-- screen's right edge and the left edge is negative.
+local DOCK_FILE = "mod_config_data/guidedmissions_tracker_position"
+local DOCK_EDGE_PAD = 8   -- gap kept between the card and either screen edge
 -- The collapsed strip is flush with the top edge of the screen (its open top
 -- needs no cap), unlike the expanded card which keeps a small margin.
 local STRIP_MARGIN_TOP = 0
@@ -196,8 +202,19 @@ local MissionTracker = Class(Widget, function(self, owner)
     self.card_open_pos = Vector3(0, 0, 0)
     self.card_offscreen_pos = Vector3(0, 0, 0)
     self.strip_open_pos = Vector3(0, 0, 0)
+    self.default_x = 0
+    self.dock_x = 0
+    self.drag_offset = 0
+    self.dragging = false
 
     self.card = self:AddChild(Widget("guidedmission_card"))
+
+    -- A transparent, clickable backing covering the card makes the whole
+    -- panel a drag handle. Everything drawn above it is SetClickable(false)
+    -- and the chevron and "?" are added later, so they stay on top and keep
+    -- receiving their clicks.
+    self.card_hit = self.card:AddChild(Image(UI_ATLAS, "blank.tex"))
+    self.card_hit:SetClickable(true)
 
     -- The crafting menu's dark translucent backing, like the real panel.
     self.card_fill = self.card:AddChild(Image(CRAFTING_ATLAS, "backing.tex"))
@@ -261,6 +278,9 @@ local MissionTracker = Class(Widget, function(self, owner)
 
     self.strip = self:AddChild(Widget("guidedmission_strip"))
 
+    self.strip_hit = self.strip:AddChild(Image(UI_ATLAS, "blank.tex"))
+    self.strip_hit:SetClickable(true)
+
     -- Collapsed: the box's underside (bottom banner over the dark fill) with
     -- the title, and a down chevron to expand again.
     self.strip_fill = self.strip:AddChild(Image(CRAFTING_ATLAS, "backing.tex"))
@@ -297,6 +317,7 @@ local MissionTracker = Class(Widget, function(self, owner)
         self:Refresh()
     end)
 
+    self:LoadDragOffset()
     self:Refresh()
 end)
 
@@ -328,7 +349,9 @@ function MissionTracker:MeasureRightMargin()
         return DEFAULT_RIGHT_MARGIN
     end
 
-    local scale = parent:GetWorldScale().x
+    -- `GetScale` is the recursive (parent-multiplied) scale; `GetWorldScale`
+    -- is not implemented in this build (see docs/dst-api.md).
+    local scale = parent:GetScale().x
     if scale == nil or scale == 0 then
         scale = 1
     end
@@ -339,17 +362,193 @@ function MissionTracker:MeasureRightMargin()
     return math.max(margin, CARD_W / 2 + 8)
 end
 
+-- Keep the whole card on screen. x is the card centre in dock-root units.
+function MissionTracker:ClampDockX(x)
+    local width = self:MeasureScreenWidth()
+    if width == nil then
+        return x
+    end
+    local min_x = -width + CARD_W / 2 + DOCK_EDGE_PAD
+    local max_x = -CARD_W / 2 - DOCK_EDGE_PAD
+    if min_x > max_x then
+        return (min_x + max_x) / 2
+    end
+    if x < min_x then
+        return min_x
+    elseif x > max_x then
+        return max_x
+    end
+    return x
+end
+
+-- Width of the screen in the dock root's local units, measured between the
+-- two top HUD anchors (both top-anchored scaling roots). nil before the HUD
+-- has been laid out, in which case clamping is skipped.
+function MissionTracker:MeasureScreenWidth()
+    local hud = self.owner ~= nil and self.owner.HUD or nil
+    local controls = hud ~= nil and hud.controls or nil
+    local left_root = controls ~= nil and controls.topleft_root or nil
+    local parent = self:GetParent()
+    if left_root == nil or parent == nil then
+        return nil
+    end
+    local scale = parent:GetScale().x
+    if scale == nil or scale == 0 then
+        return nil
+    end
+    local width = (parent:GetWorldPosition().x - left_root:GetWorldPosition().x) / scale
+    return width > 0 and width or nil
+end
+
+-- Recompute the dock positions from the default margin plus the player's drag
+-- offset, then move the visible panel there. Layout and a live drag both go
+-- through here so the open, off-screen and collapsed positions agree.
+function MissionTracker:ApplyDockX()
+    local h = self.card_h
+    local x = self:ClampDockX(self.default_x + self.drag_offset)
+    self.drag_offset = x - self.default_x
+    self.dock_x = x
+
+    self.card_open_pos = Vector3(x, -(MARGIN_TOP + h / 2), 0)
+    self.card_offscreen_pos = self.card_open_pos + Vector3(0, MARGIN_TOP + h + STEP_OFFSCREEN_Y, 0)
+    self.strip_open_pos = Vector3(x, -(STRIP_MARGIN_TOP + STRIP_H / 2), 0)
+
+    if not self.transitioning then
+        if self.expanded then
+            self.card:SetPosition(self.card_open_pos)
+        else
+            self.card:SetPosition(self.card_offscreen_pos)
+            self.strip:SetPosition(self.strip_open_pos)
+        end
+    end
+end
+
+-- A drag starts only on our own card surface. The chevron and "?" buttons sit
+-- on top of the hit area and must keep their clicks, so the deepest focused
+-- widget decides; the hover-focus chain also guarantees the click is ours.
+function MissionTracker:CanStartDrag()
+    if self.dragging or self.transitioning or not self:IsVisible()
+        or TheInput == nil or TheFrontEnd == nil
+        or TheFrontEnd.GetFocusWidget == nil then
+        return false
+    end
+    local focus = TheFrontEnd:GetFocusWidget()
+    return focus ~= nil
+        and focus ~= self.card_chevron
+        and focus ~= self.strip_chevron
+        and focus ~= self.card_hint_button
+end
+
+function MissionTracker:StartDrag()
+    if not self:CanStartDrag() then
+        return false
+    end
+    self.dragging = true
+    self.drag_start_offset = self.drag_offset
+    self.drag_last_mouse_x = TheInput:GetScreenPosition().x
+    self:StartUpdating()
+    return true
+end
+
+function MissionTracker:StopDrag()
+    if not self.dragging then
+        return
+    end
+    self.dragging = false
+    self:StopUpdating()
+    -- A plain click (no movement) must not rewrite the saved position.
+    if self.drag_offset ~= self.drag_start_offset then
+        self:SaveDragOffset()
+    end
+end
+
+-- Follow the cursor while the left button is held. The move is applied as a
+-- screen-space delta divided by the HUD scale, so the card keeps up exactly
+-- at any HUD size; ClampDockX keeps it on screen.
+function MissionTracker:OnUpdate(dt)
+    if self.inst == nil or not self.inst:IsValid() then
+        return
+    end
+    if TheInput == nil or TheInput.IsMouseDown == nil
+        or not TheInput:IsMouseDown(MOUSEBUTTON_LEFT) then
+        self:StopDrag()
+        return
+    end
+
+    local parent = self:GetParent()
+    local scale = parent ~= nil and parent:GetScale().x or nil
+    if scale == nil or scale == 0 then
+        scale = 1
+    end
+
+    local mx = TheInput:GetScreenPosition().x
+    if mx ~= self.drag_last_mouse_x then
+        self.drag_offset = self.drag_offset + (mx - self.drag_last_mouse_x) / scale
+        self.drag_last_mouse_x = mx
+        self:ApplyDockX()
+    end
+end
+
+-- The hit areas are plain Images, so nothing below consumes a card click;
+-- swallow CONTROL_ACCEPT here or it falls through to the world and moves or
+-- attacks toward the cursor.
+function MissionTracker:OnControl(control, down)
+    if Widget.OnControl(self, control, down) then
+        return true
+    end
+    return control == CONTROL_ACCEPT
+end
+
+function MissionTracker:OnMouseButton(button, down, x, y)
+    if Widget.OnMouseButton(self, button, down, x, y) then
+        return true
+    end
+    if button ~= MOUSEBUTTON_LEFT then
+        return false
+    end
+    if down then
+        return self:StartDrag()
+    end
+    self:StopDrag()
+    return true
+end
+
+-- client_save is per account, so every player keeps their own position.
+function MissionTracker:SaveDragOffset()
+    if TheSim == nil or TheSim.SetPersistentString == nil then
+        return
+    end
+    TheSim:SetPersistentString(DOCK_FILE, tostring(self.drag_offset), false)
+end
+
+function MissionTracker:LoadDragOffset()
+    if TheSim == nil or TheSim.GetPersistentString == nil then
+        return
+    end
+    TheSim:GetPersistentString(DOCK_FILE, function(success, data)
+        if not success or data == nil or data == "" or not self.inst:IsValid() then
+            return
+        end
+        local saved = tonumber(data)
+        if saved == nil then
+            return
+        end
+        self.drag_offset = saved
+        self:ApplyDockX()
+    end)
+end
+
 function MissionTracker:Layout(row_count, has_hint, title_width, has_optional)
     local h = CARD_BASE_H + ROW_H * row_count
         + (has_optional and OPTIONAL_HEADER_H or 0)
     self.card_h = h
-    local margin = self:MeasureRightMargin()
-
-    self.card_open_pos = Vector3(-(margin + CARD_W / 2), -(MARGIN_TOP + h / 2), 0)
-    self.card_offscreen_pos = self.card_open_pos + Vector3(0, MARGIN_TOP + h + STEP_OFFSCREEN_Y, 0)
-    self.strip_open_pos = Vector3(-(margin + CARD_W / 2), -(STRIP_MARGIN_TOP + STRIP_H / 2), 0)
+    self.default_x = -(self:MeasureRightMargin() + CARD_W / 2)
+    self:ApplyDockX()
 
     local top = h / 2
+
+    self.card_hit:SetSize(CARD_W, h)
+    self.card_hit:SetPosition(0, 0)
 
     self.card_fill:SetSize(CARD_W, h - FILL_INSET * 2)
     self.card_fill:SetPosition(0, 0)
@@ -407,6 +606,8 @@ function MissionTracker:Layout(row_count, has_hint, title_width, has_optional)
 
     -- The strip fill stops above the bottom rail, exactly like the card, so
     -- the rail's centre relief falls over the dark world.
+    self.strip_hit:SetSize(CARD_W, STRIP_H)
+    self.strip_hit:SetPosition(0, 0)
     self.strip_fill:SetSize(CARD_W, STRIP_H - FILL_INSET)
     self.strip_fill:SetPosition(0, FILL_INSET / 2)
 
@@ -812,12 +1013,16 @@ function MissionTracker:Transition(swap)
         swap()
         self.card:MoveTo(self.card_offscreen_pos, self.card_open_pos, SLIDE_TIME, function()
             self.transitioning = false
+            -- The slide captured its target vector before swap() ran; resync
+            -- in case the player dragged during the transition.
+            self:ApplyDockX()
         end)
     else
         self.card:MoveTo(self.card_open_pos, self.card_offscreen_pos, SLIDE_TIME, function()
             swap()
             self.card:MoveTo(self.card_offscreen_pos, self.card_open_pos, SLIDE_TIME, function()
                 self.transitioning = false
+                self:ApplyDockX()
             end)
         end)
     end

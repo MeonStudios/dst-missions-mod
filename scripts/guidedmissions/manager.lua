@@ -119,8 +119,8 @@ local GuidedMissionManager = Class(function(self, inst)
     -- the food entity, `picksomething` on the picker with the plant,
     -- `healthdelta`/`sanitydelta` on any stat change. All are pushed server-side.
     -- `guidedmissions_cookedfood`, `guidedmissions_stewedfood` and
-    -- `guidedmissions_plantedseed` are pushed by modmain's component post-inits,
-    -- because vanilla fire cooking, crockpot cooking and seed planting emit no
+    -- `guidedmissions_planted` are pushed by modmain's component post-inits,
+    -- because vanilla fire cooking, crockpot cooking and planting emit no
     -- player event. `unlockrecipe` is vanilla: Builder:UnlockRecipe pushes it
     -- when a recipe is prototyped or learned.
     inst:ListenForEvent("working", function(_, data)
@@ -148,8 +148,11 @@ local GuidedMissionManager = Class(function(self, inst)
     inst:ListenForEvent("guidedmissions_stewedfood", function(_, data)
         self:OnObjectiveEvent("guidedmissions_stewedfood", data)
     end)
-    inst:ListenForEvent("guidedmissions_plantedseed", function(_, data)
-        self:OnObjectiveEvent("guidedmissions_plantedseed", data)
+    -- Pushed by modmain's `farmplantable`/`deployable` post-inits when the
+    -- player plants a seed, a dug plant or another plantable (`data.item` is
+    -- the held item's prefab id).
+    inst:ListenForEvent("guidedmissions_planted", function(_, data)
+        self:OnObjectiveEvent("guidedmissions_planted", data)
     end)
     -- Pushed by modmain's `sleepingbaguser` post-init when the player enters a
     -- tent/bedroll (`data.bed` is the bed entity).
@@ -160,6 +163,11 @@ local GuidedMissionManager = Class(function(self, inst)
     -- that holds a catch (`data.loot` is the trap's loot prefab list).
     inst:ListenForEvent("guidedmissions_trapchecked", function(_, data)
         self:OnObjectiveEvent("guidedmissions_trapchecked", data)
+    end)
+    -- Pushed by modmain's `pickable` post-init when the player fertilizes a
+    -- barren or withered bush/grass (`data.plant` is the fertilized entity).
+    inst:ListenForEvent("guidedmissions_fertilized", function(_, data)
+        self:OnObjectiveEvent("guidedmissions_fertilized", data)
     end)
     inst:ListenForEvent("unlockrecipe", function(_, data)
         self:OnUnlockRecipe(data)

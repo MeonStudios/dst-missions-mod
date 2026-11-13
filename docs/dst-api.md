@@ -37,6 +37,7 @@ processes, takes minutes, and is the slowest way to answer anything.
 | `AddPlayerPostInit`, `AddPrefabPostInit`, `GetModConfigData` | `scripts/modutil.lua` |
 | Player event sources | `scripts/components/inventory.lua`, `builder.lua`, `combat.lua` |
 | Farming / planting seeds | `scripts/components/farmplantable.lua`, `scripts/actions.lua` (`PLANTSOIL`), `scripts/componentactions.lua` |
+| Fertilizing a bush/grass | `scripts/actions.lua` (`ACTIONS.FERTILIZE.fn`), `scripts/components/pickable.lua`, `scripts/components/fertilizer.lua`, `scripts/componentactions.lua` |
 | Components (general) | **`scripts/components/`** — not `scripts/` |
 | `player.HUD` and HUD construction | `scripts/prefabs/player_common.lua`, `scripts/screens/playerhud.lua` |
 | UI globals (`DEFAULTFONT`, `ANCHOR_*`) | `scripts/fonts.lua`, `scripts/constants.lua` |
@@ -361,11 +362,80 @@ documented and version-dependent.
   at `:375`) and plants through `Grower:PlantItem`
   (`components/grower.lua:110-147`), which uses the `plantable` component and
   pushes no player event either.
+- **Dug bushes, grass, saplings and reeds are deployed, not planted.** The
+  `dug_<plant>` items are built by `prefabs/plantables.lua`
+  (`make_plantable`, prefab at `:116`); they carry a `deployable` component
+  (`:96-99`, deploy mode `PLANT`) and **no `farmplantable`**, and their
+  `ondeploy` (`:19-40`) spawns the plant prefab directly and calls
+  `Pickable:OnTransplant`. So replanting a dug plant goes through
+  `Deployable:Deploy` and never reaches `FarmPlantable:Plant`.
+- **`deployedplant` is vanilla's own "this deploy was a planting" tag.**
+  `Deployable:Deploy` (`components/deployable.lua:132-147`) computes
+  `isplant = self.inst:HasTag("deployedplant")`, spawns through `ondeploy`,
+  pushes `deployitem` on the deployer with `{ prefab = <item id> }` — note it
+  reads `.prefab` off the item *after* `ondeploy` removed it, which works
+  because `prefab` is a plain field — and then pushes `itemplanted` on
+  **TheWorld** (not the deployer) when `isplant`. The tag is added by
+  `prefabs/plantables.lua:48` (dug bushes/grass/saplings/reeds), and also by
+  acorns, pinecones, ancient tree seeds, kelp and living-tree roots, and
+  butterflies (releasing one plants a flower). It is therefore "planted
+  something", not "planted a dug bush".
 - **Consequence for this mod:** `modmain.lua` wraps `FarmPlantable:Plant` and
-  `Deployable:Deploy`, pushing `guidedmissions_plantedseed` with
-  `{ seed = <seed prefab id> }` to the planter. The planted crop itself is not
-  reported; matching filters on the seed (`carrot_seeds`), not the crop
-  (`farm_plant_carrot`).
+  `Deployable:Deploy`, pushing `guidedmissions_planted` with
+  `{ item = <held item prefab id> }` to the planter. The deploy wrapper reports
+  when the item has a `farmplantable` component **or** the `deployedplant` tag,
+  so a `plant` objective covers seeds, dug plants and the other tagged
+  plantables. The grown crop or spawned bush is never reported: matching
+  filters on the held item (`carrot_seeds`, `dug_berrybush`), not the crop
+  (`farm_plant_carrot`) or the bush (`berrybush`). Because `deployitem` carries
+  no tag and `itemplanted` carries no prefab, the mod's component wrapper is
+  what ties the item id to "was this a planting".
+
+## Fertilizing
+
+- **Fertilizing emits no player event.** `ACTIONS.FERTILIZE.fn`
+  (`scripts/actions.lua:1812-1840`) picks a target branch in this order and
+  calls that component's `Fertilize(invobject, doer)`:
+  - `target.components.crop` and not ready for harvest and not withered →
+    `Crop:Fertilize` (tilled farm soil);
+  - `target.components.grower` and empty → `Grower:Fertilize` (retired
+    `slow_farmplot`/`fast_farmplot`);
+  - `target.components.pickable` and `CanBeFertilized()` →
+    `Pickable:Fertilize` (**bushes, grass, reeds**), which also pushes
+    `CHEVO_fertilized` on **TheWorld** (`:1823`) — a world event, not a player
+    event, and only for this branch;
+  - `target.components.quagmire_fertilizable` → the Quagmire branch.
+  If none applied and the target is nil or the doer,
+  `doer.components.fertilizable:Fertilize` runs (fertilizing yourself).
+- **Only barren or withered pickables can be fertilized.**
+  `Pickable:CanBeFertilized` (`components/pickable.lua:251-253`) is
+  `IsBarren() or HasTag("withered")`, and `IsBarren` is `cycles_left == 0`
+  (`:378-380`; the `barren` tag is added by the `cycles_left` net-var watcher at
+  `:10-16`). A plant that is still producing offers no FERTILIZE action, so a
+  bush cannot be fertilized immediately after planting it.
+- **Cycle budgets** (`prefabs/berrybush.lua:343-357`, `prefabs/grass.lua:248-255`):
+  berry bush `max_cycles = TUNING.BERRYBUSH_CYCLES (3) + math.random(2)`, juicy
+  bush the same with `BERRYBUSH_JUICY_CYCLES (3)`, grass
+  `GRASS_CYCLES = 20` (`tuning.lua:1777-1787`). Harvesting decrements
+  `cycles_left`; at 0 the plant is barren. Winter withering makes any of them
+  fertilizable regardless of cycles.
+- **`Pickable:Fertilize(fertilizer, doer)`** (`components/pickable.lua:259-293`)
+  resets `cycles_left = max_cycles`, extends `protected_cycles` by the
+  fertilizer's `withered_cycles`, then either `Witherable:ForceRejuvenate` (when
+  still withered) or `MakeEmpty`, and **always returns true** — it has no
+  failure path. The plant entity survives the call.
+- **The fertilizer item is consumed after, not inside, that call.** The action
+  calls `invobject.components.fertilizer:OnApplied(doer, target)` only when the
+  branch returned true (`actions.lua:1836-1838`); `Fertilizer:OnApplied`
+  (`components/fertilizer.lua:33-49`) spends `finiteuses` or removes the stack.
+  Reading `fertilizer.prefab` inside a `Fertilize` wrapper is therefore safe,
+  but the item is gone by the time the action returns.
+- **Consequence for this mod:** `modmain.lua` post-inits `pickable` and wraps
+  `Fertilize`, pushing `guidedmissions_fertilized` with
+  `{ plant = <the plant entity>, fertilizer = <fertilizer prefab id> }` to the
+  doer. Only this branch is hooked, so fertilizing farm crops or old farm plots
+  is deliberately not reported. Objective filters match `plant.prefab`
+  (`berrybush`, `grass`, `reeds`), not the fertilizer.
 
 ## Traps
 
@@ -619,11 +689,20 @@ documented and version-dependent.
   not assume vanilla offsets.
 - **A widget cannot report its pixel size, but it can report positions.** `Widget`
   exposes `GetWorldPosition()` (screen-space, `widgets/widget.lua:336-338`),
-  `GetWorldScale()` (`:548`), `GetPosition()` (parent space, `:340`) and `GetChildren()`
-  (`:262`) — but no `GetSize`/`GetBoundingBox` (only `Panel`/`Image` have sizes).
+  `GetPosition()` (parent space, `:340`) and `GetChildren()` (`:262`) — but no
+  `GetSize`/`GetBoundingBox` (only `Panel`/`Image` have sizes).
   To hug a HUD element, take the extreme world position of its children and back off by
   half the element's art width: `guidedmissiontracker.lua:MeasureRightMargin` does this
   for the status badges so the card sits left of them whatever size they are.
+- **`Widget:GetWorldScale()` is broken in this build — use `Widget:GetScale()`.**
+  Observed in-game 2026-11-13: `GetWorldScale` (`widgets/widget.lua:348-350`) calls
+  `self.inst.UITransform:GetWorldScale()`, but the engine UITransform has no such method,
+  so it raises `attempt to call method 'GetWorldScale' (a nil value)` at `widget.lua:349`.
+  No vanilla Lua calls `GetWorldScale()` (grep of all game scripts: zero call sites) —
+  the implemented helper is `Widget:GetScale()` (`widget.lua:547-555`), which multiplies
+  the widget's own `UITransform:GetScale()` by its parent's recursively, i.e. the total
+  HUD scale. `GetLooseScale()` (`:557-559`) is the local-only scale. Use
+  `parent:GetScale().x` to convert a screen-space delta into a dock-root local delta.
 - **Dock HUD widgets to the vanilla scaling roots, not `HUD.root`.** `Controls`
   (`widgets/controls.lua:496-545`) creates `top_root`, `topleft_root`, `bottom_root`,
   `topright_root`, etc., each as a zero-size widget with `SetHAnchor` + `SetVAnchor`,
@@ -1000,6 +1079,41 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
 - `Widget:Kill()` (`widgets/widget.lua:325`) removes the widget from its parent, kills all
   children and calls `inst:Remove()`. It is the clean way to tear down dynamic children
   (e.g. rebuilding HUD rows) before re-adding them — do **not** just drop references.
+- **Dragging a HUD widget horizontally** (verified in the scripts 2026-11-13; the tracker
+  uses this for its per-player position):
+  - Input reaches a widget only through **focus**. `FrontEnd:OnMouseButton`
+    (`frontend.lua:1287-1297`) dispatches to the top screen, and `Widget:OnMouseButton`
+    (`widget.lua:56-62`) / `Widget:OnControl` (`:124-139`) forward only down the focused
+    child chain. Hover focus comes from `FrontEnd:DoHoverFocusUpdate`
+    (`frontend.lua:932-942`) via `TheInput:GetAllEntitiesUnderMouse()`, so the drag handle
+    must be **clickable** and under the mouse. A zero-size container cannot be hovered:
+    add a child `Image("images/ui.xml", "blank.tex")` sized to the panel with
+    `Image:SetSize` and `SetClickable(true)` — the same blank texture
+    `TEMPLATES.InvisibleButton` uses (`widgets/templates.lua:858-860`). Add it **first** so
+    buttons added later stay in front (`entitiesundermouse[1]` is the front-most,
+    `input.lua:516-518`).
+  - **Mouse clicks are dispatched as `CONTROL_ACCEPT`**, not `CONTROL_PRIMARY`:
+    `frontend.lua:437-440` maps `CONTROL_PRIMARY → CONTROL_ACCEPT` before the screen sees
+    it. Consume a card click by returning true from `OnControl(CONTROL_ACCEPT, down)`; if
+    nothing consumes it, `PlayerHud:OnControl` (`screens/playerhud.lua:1436-1441`) falls
+    through to the player controller and the click moves/attacks toward the cursor.
+  - **`TheInput:GetScreenPosition()` is directly comparable to `Widget:GetWorldPosition()`**
+    — it returns `TheSim:GetPosition()` (`input.lua:246-249`), and vanilla
+    `widgets/mousetracker.lua:35-40` subtracts the two. A mouse delta becomes a local delta
+    in a scaled HUD root by dividing by `parent:GetScale().x` (**not** `GetWorldScale`,
+    which is missing in this build — see above).
+  - `button` is a `MOUSEBUTTON_*` constant (`MOUSEBUTTON_LEFT = 1000`, `constants.lua:396`).
+    `TheInput:IsMouseDown(button)` polls the held state (`input.lua:294-296`); vanilla's map
+    drag instead polls `TheInput:IsControlPressed(CONTROL_PRIMARY)` in `OnUpdate`
+    (`widgets/mapwidget.lua:84-105`) — either works.
+  - `TheInput:AddMouseButtonHandler` (`input.lua:131-133`) receives every mouse event
+    regardless of focus (used by `widgets/scripterrorwidget.lua:20`), but nothing removes it
+    for a widget: `Widget:Kill` only calls `StopUpdating()` (`widget.lua:325`). Prefer the
+    focused-widget `OnMouseButton` route plus `StartUpdating()`/`OnUpdate` polling, which
+    dies with the widget.
+  - `Widget:StartUpdating()`/`StopUpdating()` drive `OnUpdate(dt)` every frame
+    (`frontend.lua:883-896`); stop updating when the drag ends, and note `Widget:Kill`
+    stops it for you.
 - A `Widget` has no `SetSize`; sizing lives on the concrete widget types
   (`Image:SetSize`, `Text:SetSize`, `NineSlice:SetSize`, `Panel:SetSize`). A plain
   container `Widget` is zero-size and position-only, so its children's positions are in
@@ -1025,17 +1139,20 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
   The dial is therefore ~2x the clock face regardless of any other mod; it is a
   Combined Status quirk, not a shared-root conflict.
 
-## Client-side persistence (verified, not used here)
+## Client-side persistence (verified; used for the tracker drag position)
 
 - `TheSim:GetPersistentString(filename, cb)` → `cb(success, data)`;
   `TheSim:SetPersistentString(filename, data, encode, cb)`; also
   `TheSim:ErasePersistentString` (`scripts/mainfunctions.lua:44-71`). Vanilla client HUD
-  code uses it: `scripts/craftingmenuprofile.lua:41,47`.
+  code uses it: `scripts/craftingmenuprofile.lua:41,47`. The callback is optional on a
+  write (`scripts/cookbookdata.lua:21`, `scripts/loadingtipsdata.lua:24`).
 - It works on clients that are **not** the host; files land in the per-account
   `client_save/` directory. Mods conventionally use `mod_config_data/<Name>`. Do not
   repurpose `TheSim:SetSetting`/`client.ini` for mod data.
-- This mod deliberately keeps tracker state session-only (no file), so none of this is
-  currently wired up.
+- The tracker stores its per-player drag offset in
+  `mod_config_data/guidedmissions_tracker_position` (a plain number as text). Mission
+  state itself stays server-side; only this display preference is client-local. Nothing
+  is written unless the player actually moves the card.
 
 ## Entity helpers used by this mod
 

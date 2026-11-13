@@ -409,33 +409,86 @@ Pick `count` plants of a prefab.
 
 ### `plant`
 
-Plant `count` seeds in tilled farm soil.
+Put a plant in the ground `count` times: a seed in tilled soil, or anything
+deployed as a plant — a dug bush, grass, sapling or reeds, an acorn or pinecone,
+a tree seed or kelp root.
 
 | Field | Required | Default |
 |---|---|---|
 | `count` | yes | — |
-| `prefab` | no | any seed |
+| `prefab` | no | any plantable item |
 | `icon` | no | `prefab`, otherwise `seeds` |
 
-- **Completes when:** the player plants a seed into a tilled soil plot (made
-  with a Garden Hoe or the Garden Digamajig's plowed soil), `count` times.
-- **Trigger:** a `guidedmissions_plantedseed` event pushed by the mod, because
-  vanilla emits no player event for planting. The seed's `farmplantable`
-  component (`FarmPlantable:Plant`, called by the `PLANTSOIL` action) is
-  observed in `modmain.lua`; Wormwood's deploy-based planting is observed
-  through the `deployable` component. See `docs/dst-api.md`, "Farming".
-- **Optional `prefab` filters on the seed the player planted**, not the crop
-  that grows: `carrot_seeds`, `pumpkin_seeds`, or the generic `seeds`. Vanilla
-  plant prefabs are named `farm_plant_<crop>` (`farm_plant_carrot`) and are not
-  what this field matches.
+- **Completes when:** the player plants `count` things. Two engine paths count,
+  and they are the same player intent ("put a plant in the ground"), so they
+  share one type:
+  - **Seeds in tilled soil** — a soil plot made with a Garden Hoe or the Garden
+    Digamajig's plowed soil. Observed through the seed's `farmplantable`
+    component (`FarmPlantable:Plant`, called by the `PLANTSOIL` action), plus
+    Wormwood's deploy-based seed planting.
+  - **Deployed plantables** — dug plants (`dug_berrybush`, `dug_grass`,
+    `dug_sapling`, `dug_reeds`, ...) and other items the game tags
+    `deployedplant` (acorns, pinecones, tree seeds, kelp roots; the tag is what
+    vanilla uses to decide a deploy was a planting).
+- **Trigger:** a `guidedmissions_planted` event pushed by the mod, because
+  vanilla emits no player event for planting. See `docs/dst-api.md`, "Farming
+  and planting".
+- **Optional `prefab` filters on the item the player was holding**, not the
+  plant that grows: `carrot_seeds`, `seeds`, `dug_berrybush`, `pinecone`. So
+  seeds use seed ids (`farm_plant_carrot` is the grown crop and never matches)
+  and dug plants use their `dug_` id (`berrybush`, the bush itself, never
+  matches).
 - **Does not count:** planting in the retired `slow_farmplot`/`fast_farmplot`
   structures (those use the old `grower` component), or dropping a seed on the
   ground.
-- **Icon:** the seed prefab when `prefab` is set, otherwise the generic `seeds`
-  art (override with `icon`). The planted crop itself has no inventory icon.
+- **Icon:** the held item's prefab when `prefab` is set — a dug plant has no
+  inventory art, so set `icon = "berries"` for a berry bush — otherwise the
+  generic `seeds` art. Override with `icon`.
 
 ```lua
 { type = "plant", prefab = "carrot_seeds", count = 3, label = "Plant carrots" }
+{ type = "plant", prefab = "dug_berrybush", count = 1, icon = "berries",
+  label = "Replant a berry bush" }
+{ type = "plant", count = 2, label = "Plant something" }
+```
+
+### `fertilize`
+
+Fertilize `count` barren or withered plants.
+
+| Field | Required | Default |
+|---|---|---|
+| `count` | yes | — |
+| `prefab` | no | any pickable plant |
+| `icon` | no | `prefab`, otherwise `rot` |
+
+- **Completes when:** the player fertilizes a planted bush, grass tuft or reeds
+  `count` times. Any fertilizer counts — rot, manure, guano, compost, spoiled
+  food.
+- **Trigger:** a `guidedmissions_fertilized` event pushed by the mod, because
+  vanilla emits no player event for fertilizing. `modmain.lua` wraps
+  `Pickable:Fertilize`, the branch the `FERTILIZE` action takes for a pickable
+  target. See `docs/dst-api.md`, "Fertilizing".
+- **Only barren or withered plants can be fertilized.** Vanilla offers no
+  FERTILIZE action on a plant that is still producing, so a freshly planted
+  bush or tuft cannot satisfy this objective on demand. A berry bush goes
+  barren after `BERRYBUSH_CYCLES` (3) harvests plus up to two random ones, grass
+  after `GRASS_CYCLES` (20), and any plant can be fertilized while withered in
+  winter. Fertilizing rejuvenates or refills the plant.
+- **Matching:** `prefab` filters the **plant that was fertilized**, not the
+  fertilizer used: `berrybush`, `berrybush_juicy`, `grass`, `reeds`. Variants
+  are separate ids, so `berrybush` does not match `berrybush_juicy`.
+- **Does not count:** fertilizing a crop in tilled farm soil, an old
+  `slow_farmplot`/`fast_farmplot`, or the player themself — those are other
+  branches of the `FERTILIZE` action and are deliberately not reported.
+- **Icon:** the plant id when `prefab` is set, but plants are world entities
+  with no inventory icon, so a filtered row draws nothing unless `icon` names an
+  item (`berries` for a berry bush). An unfiltered row shows the `rot` item.
+
+```lua
+{ type = "fertilize", count = 1, label = "Fertilize a plant" }
+{ type = "fertilize", prefab = "berrybush", count = 1, icon = "berries",
+  label = "Fertilize a berry bush" }
 ```
 
 ### `collect_food`
@@ -554,7 +607,8 @@ Learn `count` new recipes.
 | Make a Crock Pot dish | `cookpot` |
 | Learn recipes | `prototype` |
 | Chop / mine / pick verbs | `chop` / `mine` / `pick` |
-| Plant seeds in tilled soil | `plant` |
+| Plant a seed or replant a dug plant | `plant` |
+| Fertilize a bush or grass tuft | `fertilize` |
 | Sleep in a tent | `sleep` |
 | Reach a stat percentage | `reach_stat` |
 
@@ -577,16 +631,18 @@ Learn `count` new recipes.
 | `cook` | `guidedmissions_cookedfood` (mod pushed) | `product.prefab` |
 | `cookpot` | `guidedmissions_stewedfood` (mod pushed) | `product` (a string) |
 | `prototype` | `unlockrecipe` | `data.recipe` matched to objective `prefab` (a recipe id), deduplicated |
-| `plant` | `guidedmissions_plantedseed` (mod pushed) | `seed` (a prefab id string) |
+| `plant` | `guidedmissions_planted` (mod pushed) | `item` (the held item's prefab id) |
 | `trap_catch` | `guidedmissions_trapchecked` (mod pushed) | objective `prefab` matched against any entry in `data.loot` |
 | `sleep` | `guidedmissions_slept` (mod pushed) | objective `prefab` matched to `data.bed.prefab` |
+| `fertilize` | `guidedmissions_fertilized` (mod pushed) | objective `prefab` matched to `data.plant.prefab` |
 | `reach_stat` | `healthdelta` / `sanitydelta` + 1 s poll | live stat percentage vs objective `threshold` |
 
-`cookedfood`/`stewedfood`/`plantedseed`/`trapchecked`/`slept` exist because vanilla
-fire cooking, Crock Pot cooking, seed planting, trap checking and entering a bed emit
-no player event; `modmain.lua` post-inits the `cooker`, `stewer`, `farmplantable`,
-`deployable`, `trap` and `sleepingbaguser` components to report them. See
-`docs/dst-api.md` for the verified engine behavior behind each row.
+`cookedfood`/`stewedfood`/`planted`/`trapchecked`/`slept`/`fertilized` exist
+because vanilla fire cooking, Crock Pot cooking, planting, trap checking, entering
+a bed and fertilizing a plant emit no player event; `modmain.lua` post-inits the
+`cooker`, `stewer`, `farmplantable`, `deployable`, `trap`, `sleepingbaguser` and
+`pickable` components to report them. See `docs/dst-api.md` for the verified
+engine behavior behind each row.
 
 ## Adding or changing an objective type
 

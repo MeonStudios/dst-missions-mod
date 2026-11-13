@@ -121,6 +121,13 @@ function Objectives.GetIconPrefab(objective)
         -- `frog`, ...); an unfiltered objective falls back to the trap item.
         return objective.prefab or "trap"
     end
+    if objective.type == "fertilize" then
+        -- Like `pick`/`plant`: the fertilized plant is a world entity, so a
+        -- filtered row (`berrybush`, `grass`) usually has no inventory art and
+        -- draws nothing unless `icon` points at an item (e.g. `berries`). An
+        -- unfiltered row shows the rot item, the most common fertilizer.
+        return objective.icon or objective.prefab or "rot"
+    end
 
     if objective.type == "collect" or objective.type == "craft"
         or objective.type == "build" or objective.type == "kill"
@@ -422,14 +429,17 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
                 return 1
             end
         end
-    elseif event == "guidedmissions_plantedseed" then
+    elseif event == "guidedmissions_planted" then
         -- Pushed by modmain's `farmplantable`/`deployable` post-inits, because
-        -- planting a seed in tilled farm soil emits no player event. `seed` is
-        -- the seed's prefab id (a string, like `carrot_seeds` or `seeds`), not
-        -- the crop that grows from it. See docs/dst-api.md, "Farming".
+        -- putting a plant in the ground emits no player event. `item` is the
+        -- prefab id of the thing the player held (a string): a seed
+        -- (`carrot_seeds`, `seeds`) for tilled soil, or a dug plant
+        -- (`dug_berrybush`) or other plantable (`pinecone`, `acorn`) for a
+        -- deploy. It is never the crop or bush that grows from it. See
+        -- docs/dst-api.md, "Farming and planting".
         if objective.type == "plant" then
-            local seed = data.seed
-            if objective.prefab == nil or seed == objective.prefab then
+            local item = data.item
+            if objective.prefab == nil or item == objective.prefab then
                 return 1
             end
         end
@@ -466,6 +476,17 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
                 or (data.bed ~= nil and data.bed.prefab == objective.prefab)) then
             return 1
         end
+    elseif event == "guidedmissions_fertilized" then
+        -- Pushed by modmain's `pickable` post-init, because fertilizing a bush
+        -- or grass tuft emits no player event. `plant` is the fertilized
+        -- entity, so `prefab` matches the plant (`berrybush`, `grass`), not the
+        -- fertilizer. Farm crops and old farm plots are not reported, so this
+        -- only ever sees a pickable plant.
+        if objective.type == "fertilize"
+            and (objective.prefab == nil
+                or (data.plant ~= nil and data.plant.prefab == objective.prefab)) then
+            return 1
+        end
     end
 
     return 0
@@ -494,6 +515,7 @@ Objectives.VALID_TYPES = {
     prototype = true,
     trap_catch = true,
     sleep = true,
+    fertilize = true,
     reach_stat = true,
 }
 
