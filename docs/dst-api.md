@@ -37,6 +37,7 @@ processes, takes minutes, and is the slowest way to answer anything.
 | `AddPlayerPostInit`, `AddPrefabPostInit`, `GetModConfigData` | `scripts/modutil.lua` |
 | Player event sources | `scripts/components/inventory.lua`, `builder.lua`, `combat.lua` |
 | Farming / planting seeds | `scripts/components/farmplantable.lua`, `scripts/actions.lua` (`PLANTSOIL`), `scripts/componentactions.lua` |
+| Fertilizing a bush/grass | `scripts/actions.lua` (`ACTIONS.FERTILIZE.fn`), `scripts/components/pickable.lua`, `scripts/components/fertilizer.lua`, `scripts/componentactions.lua` |
 | Components (general) | **`scripts/components/`** — not `scripts/` |
 | `player.HUD` and HUD construction | `scripts/prefabs/player_common.lua`, `scripts/screens/playerhud.lua` |
 | UI globals (`DEFAULTFONT`, `ANCHOR_*`) | `scripts/fonts.lua`, `scripts/constants.lua` |
@@ -361,11 +362,80 @@ documented and version-dependent.
   at `:375`) and plants through `Grower:PlantItem`
   (`components/grower.lua:110-147`), which uses the `plantable` component and
   pushes no player event either.
+- **Dug bushes, grass, saplings and reeds are deployed, not planted.** The
+  `dug_<plant>` items are built by `prefabs/plantables.lua`
+  (`make_plantable`, prefab at `:116`); they carry a `deployable` component
+  (`:96-99`, deploy mode `PLANT`) and **no `farmplantable`**, and their
+  `ondeploy` (`:19-40`) spawns the plant prefab directly and calls
+  `Pickable:OnTransplant`. So replanting a dug plant goes through
+  `Deployable:Deploy` and never reaches `FarmPlantable:Plant`.
+- **`deployedplant` is vanilla's own "this deploy was a planting" tag.**
+  `Deployable:Deploy` (`components/deployable.lua:132-147`) computes
+  `isplant = self.inst:HasTag("deployedplant")`, spawns through `ondeploy`,
+  pushes `deployitem` on the deployer with `{ prefab = <item id> }` — note it
+  reads `.prefab` off the item *after* `ondeploy` removed it, which works
+  because `prefab` is a plain field — and then pushes `itemplanted` on
+  **TheWorld** (not the deployer) when `isplant`. The tag is added by
+  `prefabs/plantables.lua:48` (dug bushes/grass/saplings/reeds), and also by
+  acorns, pinecones, ancient tree seeds, kelp and living-tree roots, and
+  butterflies (releasing one plants a flower). It is therefore "planted
+  something", not "planted a dug bush".
 - **Consequence for this mod:** `modmain.lua` wraps `FarmPlantable:Plant` and
-  `Deployable:Deploy`, pushing `guidedmissions_plantedseed` with
-  `{ seed = <seed prefab id> }` to the planter. The planted crop itself is not
-  reported; matching filters on the seed (`carrot_seeds`), not the crop
-  (`farm_plant_carrot`).
+  `Deployable:Deploy`, pushing `guidedmissions_planted` with
+  `{ item = <held item prefab id> }` to the planter. The deploy wrapper reports
+  when the item has a `farmplantable` component **or** the `deployedplant` tag,
+  so a `plant` objective covers seeds, dug plants and the other tagged
+  plantables. The grown crop or spawned bush is never reported: matching
+  filters on the held item (`carrot_seeds`, `dug_berrybush`), not the crop
+  (`farm_plant_carrot`) or the bush (`berrybush`). Because `deployitem` carries
+  no tag and `itemplanted` carries no prefab, the mod's component wrapper is
+  what ties the item id to "was this a planting".
+
+## Fertilizing
+
+- **Fertilizing emits no player event.** `ACTIONS.FERTILIZE.fn`
+  (`scripts/actions.lua:1812-1840`) picks a target branch in this order and
+  calls that component's `Fertilize(invobject, doer)`:
+  - `target.components.crop` and not ready for harvest and not withered →
+    `Crop:Fertilize` (tilled farm soil);
+  - `target.components.grower` and empty → `Grower:Fertilize` (retired
+    `slow_farmplot`/`fast_farmplot`);
+  - `target.components.pickable` and `CanBeFertilized()` →
+    `Pickable:Fertilize` (**bushes, grass, reeds**), which also pushes
+    `CHEVO_fertilized` on **TheWorld** (`:1823`) — a world event, not a player
+    event, and only for this branch;
+  - `target.components.quagmire_fertilizable` → the Quagmire branch.
+  If none applied and the target is nil or the doer,
+  `doer.components.fertilizable:Fertilize` runs (fertilizing yourself).
+- **Only barren or withered pickables can be fertilized.**
+  `Pickable:CanBeFertilized` (`components/pickable.lua:251-253`) is
+  `IsBarren() or HasTag("withered")`, and `IsBarren` is `cycles_left == 0`
+  (`:378-380`; the `barren` tag is added by the `cycles_left` net-var watcher at
+  `:10-16`). A plant that is still producing offers no FERTILIZE action, so a
+  bush cannot be fertilized immediately after planting it.
+- **Cycle budgets** (`prefabs/berrybush.lua:343-357`, `prefabs/grass.lua:248-255`):
+  berry bush `max_cycles = TUNING.BERRYBUSH_CYCLES (3) + math.random(2)`, juicy
+  bush the same with `BERRYBUSH_JUICY_CYCLES (3)`, grass
+  `GRASS_CYCLES = 20` (`tuning.lua:1777-1787`). Harvesting decrements
+  `cycles_left`; at 0 the plant is barren. Winter withering makes any of them
+  fertilizable regardless of cycles.
+- **`Pickable:Fertilize(fertilizer, doer)`** (`components/pickable.lua:259-293`)
+  resets `cycles_left = max_cycles`, extends `protected_cycles` by the
+  fertilizer's `withered_cycles`, then either `Witherable:ForceRejuvenate` (when
+  still withered) or `MakeEmpty`, and **always returns true** — it has no
+  failure path. The plant entity survives the call.
+- **The fertilizer item is consumed after, not inside, that call.** The action
+  calls `invobject.components.fertilizer:OnApplied(doer, target)` only when the
+  branch returned true (`actions.lua:1836-1838`); `Fertilizer:OnApplied`
+  (`components/fertilizer.lua:33-49`) spends `finiteuses` or removes the stack.
+  Reading `fertilizer.prefab` inside a `Fertilize` wrapper is therefore safe,
+  but the item is gone by the time the action returns.
+- **Consequence for this mod:** `modmain.lua` post-inits `pickable` and wraps
+  `Fertilize`, pushing `guidedmissions_fertilized` with
+  `{ plant = <the plant entity>, fertilizer = <fertilizer prefab id> }` to the
+  doer. Only this branch is hooked, so fertilizing farm crops or old farm plots
+  is deliberately not reported. Objective filters match `plant.prefab`
+  (`berrybush`, `grass`, `reeds`), not the fertilizer.
 
 ## Traps
 

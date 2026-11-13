@@ -169,38 +169,71 @@ end)
 
 -- Planting a seed in tilled farm soil emits no player event. The seed item
 -- (`seeds`, `carrot_seeds`, ...) carries the `farmplantable` component, and the
--- PLANTSOIL action calls FarmPlantable:Plant(target, planter); report the seed
--- to the planter when that returns true. Capture the prefab before the call:
--- a successful Plant removes the seed entity. See docs/dst-api.md, "Farming".
+-- PLANTSOIL action calls FarmPlantable:Plant(target, planter); report the held
+-- item to the planter when that returns true. Capture the prefab before the
+-- call: a successful Plant removes the seed entity. Dug plants reach this same
+-- objective through the `deployable` hook below.
+-- See docs/dst-api.md, "Farming and planting".
 AddComponentPostInit("farmplantable", function(self)
     local _Plant = self.Plant
     self.Plant = function(component, target, planter)
-        local seed_prefab = component.inst.prefab
+        local item_prefab = component.inst.prefab
         local planted = _Plant(component, target, planter)
         if planted and planter ~= nil and planter.PushEvent ~= nil then
-            planter:PushEvent("guidedmissions_plantedseed", { seed = seed_prefab })
+            planter:PushEvent("guidedmissions_planted", { item = item_prefab })
         end
         return planted
     end
 end)
 
--- Wormwood is the only `plantkin`, so seeds are deployable for him and only
--- him (`deployable.restrictedtag = "plantkin"`); that path calls the seed's
--- ondeploy callback directly instead of FarmPlantable:Plant. Report it with
--- the same event. `is_seed` is read before the call because a successful
--- deploy removes the seed.
+-- Planting something into the ground emits no player event, and two paths reach
+-- Deployable:Deploy:
+--   * Wormwood is the only `plantkin`, so seeds are deployable for him and only
+--     him (`deployable.restrictedtag = "plantkin"`); that path calls the seed's
+--     ondeploy callback directly instead of FarmPlantable:Plant. Seeds carry a
+--     `farmplantable` component.
+--   * Dug plants (`dug_berrybush`, `dug_grass`, `dug_sapling`, ...) and other
+--     plantables (acorns, pinecones, tree seeds, kelp roots) carry the
+--     `deployedplant` tag (`prefabs/plantables.lua:48`), which is the same
+--     predicate vanilla uses to decide whether to push `itemplanted`
+--     (`components/deployable.lua:137`).
+-- Report the held item to the deployer. The prefab is read before the call
+-- because a successful deploy removes the item.
 AddComponentPostInit("deployable", function(self)
     local _Deploy = self.Deploy
     self.Deploy = function(component, pt, deployer, rot)
         local inst = component.inst
-        local is_seed = inst ~= nil and inst.components ~= nil
-            and inst.components.farmplantable ~= nil
-        local seed_prefab = inst ~= nil and inst.prefab or nil
+        local is_plantable = inst ~= nil and inst.components ~= nil
+            and (inst.components.farmplantable ~= nil or inst:HasTag("deployedplant"))
+        local item_prefab = inst ~= nil and inst.prefab or nil
         local deployed, reason = _Deploy(component, pt, deployer, rot)
-        if is_seed and deployed and deployer ~= nil and deployer.PushEvent ~= nil then
-            deployer:PushEvent("guidedmissions_plantedseed", { seed = seed_prefab })
+        if is_plantable and deployed and deployer ~= nil and deployer.PushEvent ~= nil then
+            deployer:PushEvent("guidedmissions_planted", { item = item_prefab })
         end
         return deployed, reason
+    end
+end)
+
+-- Fertilizing a bush or grass tuft emits no player event. The FERTILIZE action
+-- sends a pickable target through `Pickable:Fertilize(fertilizer, doer)`
+-- (`actions.lua:1821-1822`), and only when the plant is barren or withered
+-- (`Pickable:CanBeFertilized`, `components/pickable.lua:251-253`). That function
+-- rejuvenates or fills the plant and returns true, so report the target once
+-- the call succeeds. Farm crops and the retired farm plots are different
+-- branches of the same action and are deliberately not reported. The plant
+-- itself survives the call; only the fertilizer is consumed, by the action
+-- afterwards (`Fertilizer:OnApplied`). See docs/dst-api.md, "Fertilizing".
+AddComponentPostInit("pickable", function(self)
+    local _Fertilize = self.Fertilize
+    self.Fertilize = function(component, fertilizer, doer)
+        local applied = _Fertilize(component, fertilizer, doer)
+        if applied and doer ~= nil and doer.PushEvent ~= nil then
+            doer:PushEvent("guidedmissions_fertilized", {
+                plant = component.inst,
+                fertilizer = fertilizer ~= nil and fertilizer.prefab or nil,
+            })
+        end
+        return applied
     end
 end)
 

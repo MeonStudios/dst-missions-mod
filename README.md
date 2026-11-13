@@ -48,7 +48,8 @@ Supported objective types:
 | `reach_stat` | `stat`, `threshold` | the player's health/sanity meets the threshold (live percentage, e.g. `">=75"`) |
 | `mine`    | `count`           | the player finishes mining `count` nodes with a pickaxe |
 | `pick`    | `prefab`, `count` | the player picks `count` of the plant prefab |
-| `plant`   | `count`, optional `prefab` (a seed) | the player plants `count` seeds in tilled farm soil |
+| `plant`   | `count`, optional `prefab` (the held item) | the player plants `count` seeds in tilled soil or deploys `count` dug plants/plantables |
+| `fertilize` | `count`, optional `prefab` (a plant) | the player fertilizes `count` barren/withered bushes or grass |
 | `collect_food` | `count`, optional `foodtype`/`secondaryfoodtype` | the player has held `count` edible items (peak holdings, like `collect`) |
 | `cook`    | `count`, optional `prefab` | the player cooks `count` food items on a fire |
 | `cookpot` | `count`, optional `prefab` | the player starts cooking `count` dishes in a Crock Pot (optional dish filter) |

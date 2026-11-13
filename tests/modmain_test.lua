@@ -324,9 +324,9 @@ if type(farmplantable_postinit) == "function" then
     Check("farmplantable wrapper returns Plant's result",
         component:Plant({}, planter) == true)
     Check("planting reports the seed",
-        #planter.events == 1 and planter.events[1].name == "guidedmissions_plantedseed")
-    Check("plantedseed event carries the seed prefab",
-        planter.events[1] ~= nil and planter.events[1].data.seed == "carrot_seeds")
+        #planter.events == 1 and planter.events[1].name == "guidedmissions_planted")
+    Check("planted event carries the held item's prefab",
+        planter.events[1] ~= nil and planter.events[1].data.item == "carrot_seeds")
 
     -- A refused plant (wrong target, no crop) must report nothing.
     local refused = NewFarmPlantable(false)
@@ -344,16 +344,22 @@ end
 -- ---- deployable post-init -------------------------------------------------
 -- Wormwood plants seeds through deployable (restrictedtag "plantkin"); that
 -- path spawns the crop directly, so it is reported separately from PLANTSOIL.
+-- Dug plants (bushes, grass, saplings) and other plantables are also deployed,
+-- recognised by the `deployedplant` tag rather than a farmplantable component.
 
 local deployable_postinit = component_postinits.deployable
 Check("deployable post-init registered", type(deployable_postinit) == "function")
 
-local function NewDeployable(is_seed, deployed)
-    local component = { inst = { prefab = is_seed and "seeds" or "tent" } }
-    if is_seed then
+-- Both plantable paths are covered: a seed (farmplantable, Wormwood) and a dug
+-- plant or other plantable (the `deployedplant` tag, prefabs/plantables.lua:48).
+local function NewDeployable(prefab, is_plantable, deployed)
+    local component = { inst = { prefab = prefab, components = {} } }
+    if is_plantable == "farmplantable" then
         component.inst.components = { farmplantable = {} }
-    else
-        component.inst.components = {}
+    end
+    component.inst.tags = { deployedplant = is_plantable == "deployedplant" }
+    function component.inst:HasTag(tag)
+        return self.tags[tag] == true
     end
     function component:Deploy()
         return deployed, "reason"
@@ -362,26 +368,37 @@ local function NewDeployable(is_seed, deployed)
 end
 
 if type(deployable_postinit) == "function" then
-    local seed = NewDeployable(true, true)
+    local seed = NewDeployable("seeds", "farmplantable", true)
     deployable_postinit(seed)
     local planter = NewChef()
     local deployed, reason = seed:Deploy({}, planter)
     Check("deployable wrapper returns Deploy's result",
         deployed == true and reason == "reason")
     Check("deploying a seed reports the seed",
-        #planter.events == 1 and planter.events[1].name == "guidedmissions_plantedseed")
-    Check("deployed seed event carries the seed prefab",
-        planter.events[1] ~= nil and planter.events[1].data.seed == "seeds")
+        #planter.events == 1 and planter.events[1].name == "guidedmissions_planted")
+    Check("planted event carries the held item's prefab",
+        planter.events[1] ~= nil and planter.events[1].data.item == "seeds")
+
+    -- A dug plant is planted by deploying it, and reports the dug item id (not
+    -- the bush that gets spawned).
+    local dug = NewDeployable("dug_berrybush", "deployedplant", true)
+    deployable_postinit(dug)
+    local dug_planter = NewChef()
+    Check("deploying a dug plant succeeds", dug:Deploy({}, dug_planter) == true)
+    Check("deploying a dug plant reports it",
+        #dug_planter.events == 1
+            and dug_planter.events[1].name == "guidedmissions_planted"
+            and dug_planter.events[1].data.item == "dug_berrybush")
 
     -- Deploying anything else (a tent, a boat) is not planting.
-    local other = NewDeployable(false, true)
+    local other = NewDeployable("tent", nil, true)
     deployable_postinit(other)
     local other_planter = NewChef()
     other:Deploy({}, other_planter)
-    Check("deploying a non-seed reports nothing", #other_planter.events == 0)
+    Check("deploying a non-plantable reports nothing", #other_planter.events == 0)
 
     -- A refused deploy (CanDeploy false) must report nothing.
-    local refused = NewDeployable(true, false)
+    local refused = NewDeployable("dug_grass", "deployedplant", false)
     deployable_postinit(refused)
     local refused_planter = NewChef()
     Check("refused deploy returns false", refused:Deploy({}, refused_planter) == false)
@@ -463,6 +480,51 @@ if type(sleeper_postinit) == "function" then
     local before = #player.events
     component:DoSleep(nil)
     Check("sleep hook ignores a nil bed", #player.events == before)
+end
+
+-- ---- pickable post-init (fertilizing) ------------------------------------
+-- Fertilizing a barren/withered bush or grass tuft emits no vanilla player
+-- event. The FERTILIZE action calls Pickable:Fertilize(fertilizer, doer), so
+-- modmain reports the fertilized plant to the player. Farm crops take other
+-- branches of the action and never reach this component.
+
+local pickable_postinit = component_postinits.pickable
+Check("pickable post-init registered", type(pickable_postinit) == "function")
+
+local function NewPickable(applied)
+    local component = { inst = { prefab = "berrybush" } }
+    function component:Fertilize()
+        self.fertilized = true
+        return applied
+    end
+    return component
+end
+
+if type(pickable_postinit) == "function" then
+    local plant = NewPickable(true)
+    pickable_postinit(plant)
+    local doer = NewChef()
+    local applied = plant:Fertilize({ prefab = "rot" }, doer)
+    Check("pickable wrapper returns Fertilize's result", applied == true)
+    Check("fertilizing forwards the vanilla behaviour", plant.fertilized == true)
+    Check("fertilizing reports the plant to the player",
+        #doer.events == 1
+            and doer.events[1].name == "guidedmissions_fertilized"
+            and doer.events[1].data.plant == plant.inst)
+    Check("fertilized event carries the fertilizer prefab",
+        doer.events[1] ~= nil and doer.events[1].data.fertilizer == "rot")
+
+    -- A refused fertilize must report nothing.
+    local refused = NewPickable(false)
+    pickable_postinit(refused)
+    local refused_doer = NewChef()
+    Check("refused fertilize returns false", refused:Fertilize({ prefab = "rot" }, refused_doer) == false)
+    Check("refused fertilize reports nothing", #refused_doer.events == 0)
+
+    -- No doer (or no fertilizer) must not error.
+    local bare = NewPickable(true)
+    pickable_postinit(bare)
+    Check("fertilizing without a doer is safe", bare:Fertilize() == true)
 end
 
 -- ---- fake players ---------------------------------------------------------

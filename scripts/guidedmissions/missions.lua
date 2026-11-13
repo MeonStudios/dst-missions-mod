@@ -177,6 +177,18 @@ return {
         },
     },
     {
+        id = "plant_bushes",
+        title = "Branching Out",
+        subtext = "Bushes: now available for relocation.",
+        hint = "Dig plants up with a Shovel. Bushes & Grass need poop or spoiled food.",
+        objectives = {
+            { type = "craft", prefab = "shovel", count = 1, label = "Craft a Shovel" },
+            { type = "plant", prefab = "dug_berrybush", count = 1, label = "Replant a berry bush" },
+            { type = "plant", prefab = "dug_sapling", count = 2, label = "Replant saplings" },
+            { type = "fertilize", count = 1, label = "Fertilize your bush", optional = true },
+        },
+    },
+    {
         id = "find_meat",
         title = "Where's the Beef?",
         subtext = "Something out there must be edible.",
@@ -234,6 +246,36 @@ return {
             { type = "collect", prefab = "log", count = 20, label = "Collect logs" },
             { type = "collect", prefab = "twigs", count = 30, label = "Collect twigs" },
             { type = "collect", prefab = "cutgrass", count = 30, label = "Collect grass" },
+        },
+    },
+    {
+        id = "silk",
+        title = "Silk Road",
+        subtext = "Spiders: nature's tailors. Reluctantly.",
+        hint = "Fight with Spear and Log Suit, or use Traps. Dens drop lots of silk.",
+        objectives = {
+            { type = "collect", prefab = "silk", count = 4, label = "Collect silk" },
+        },
+    },
+    {
+        id = "birdcage",
+        title = "Home Tweet Home",
+        subtext = "Free eggs. The bird has no say in it.",
+        hint = "Build the cage first. A trap can be baited with seeds to catch a bird quickly.",
+        objectives = {
+            { type = "craft", prefab = "birdtrap", count = 1, label = "Craft a Bird Trap" },
+            { type = "build", prefab = "birdcage", count = 1, label = "Build a Birdcage" },
+        },
+    },
+    {
+        id = "breakfast",
+        title = "Breakfast Club",
+        subtext = "Nothing beats a bird that pays in eggs.",
+        hint = "Feed the bird meat for eggs.",
+        objectives = {
+            { type = "collect", prefab = "bird_egg", count = 2, label = "Collect eggs" },
+            { type = "cookpot", prefab = "perogies", count = 1, label = "Cook pierogi" },
+            { type = "cookpot", prefab = "baconeggs", count = 1, label = "Cook bacon and eggs", optional = true },
         },
     },
 }
