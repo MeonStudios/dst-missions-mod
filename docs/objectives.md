@@ -176,14 +176,31 @@ Place `count` structures in the world.
 |---|---|---|
 | `prefab` | yes | — |
 | `count` | yes | — |
+| `shared` | no | off |
 
 - **Completes when:** the player places the structure `prefab`, `count` times.
-- **Trigger:** the `buildstructure` player event.
+- **Trigger:** the `buildstructure` player event, plus a 1-second poll for
+  `shared` rows (see below).
 - **Icon:** `prefab`.
 - **Not for:** carryable products — those are `craft`.
 
 ```lua
 { type = "build", prefab = "firepit", count = 1, label = "Build a Fire Pit" }
+```
+
+**Multiplayer mode.** `shared = true` is valid on `build` rows only. When the
+**Multiplayer Mode** mod option is enabled (Mods → Configure), the row also
+counts a copy of the structure already standing within about 15 tiles (60 world
+units, roughly two screens) of the player — one base fire pit or Science
+Machine serves everyone. The row checks immediately at mission start if the
+structure is already there, and mid-mission when a teammate builds one; once
+checked it stays checked as the player walks away. With the option off, `shared`
+does nothing and the player must build their own, which is the normal rule.
+This reads world entities only: it creates no shared or team mission state.
+
+```lua
+{ type = "build", prefab = "researchlab", count = 1, label = "Build a Science Machine",
+  shared = true }
 ```
 
 ### `kill`
@@ -644,7 +661,7 @@ Learn `count` new recipes.
 | `collect_food` | inventory event, reread next tick | `edible` component + stack size (peak) |
 | `survive` | 1 s poll | world day (`cycles + 1`) |
 | `craft` | `builditem` | `data.recipe.name` or `data.item.prefab` |
-| `build` | `buildstructure` | `data.recipe.name` or `data.item.prefab` |
+| `build` | `buildstructure`, plus a 1 s poll for `shared` rows | `data.recipe.name` or `data.item.prefab`; nearby `structure` entities matching `prefab` |
 | `kill` | `killed` | `data.victim.prefab` |
 | `eat` | `oneat` | `data.food.prefab` |
 | `pick` | `picksomething` | `data.object.prefab` |

@@ -77,6 +77,7 @@ end
 local config_values = {
     SHOW_TRACKER = true,
     ANNOUNCE_MISSIONS = true,
+    MULTIPLAYER_MODE = true,
     EMERGENCY_FREQUENCY = "always",
 }
 
@@ -159,6 +160,8 @@ Check("modmain loads in the sandbox", ok, err)
 local Settings = require("guidedmissions/settings")
 Check("emergency frequency comes from the mod config",
     Settings.emergency_frequency == "always", Settings.emergency_frequency)
+Check("multiplayer mode comes from the mod config",
+    Settings.multiplayer_mode == true, Settings.multiplayer_mode)
 
 Check("c_setmission is a console global", type(_G.c_setmission) == "function")
 Check("c_resetmissions is a console global", type(_G.c_resetmissions) == "function")

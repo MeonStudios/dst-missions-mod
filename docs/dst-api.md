@@ -36,6 +36,7 @@ processes, takes minutes, and is the slowest way to answer anything.
 | Why an undeclared global errored | `scripts/strict.lua` |
 | `AddPlayerPostInit`, `AddPrefabPostInit`, `GetModConfigData` | `scripts/modutil.lua` |
 | Player event sources | `scripts/components/inventory.lua`, `builder.lua`, `combat.lua` |
+| Finding entities near a player | `scripts/components/combat.lua` (`TheSim:FindEntities` usage) |
 | Farming / planting seeds | `scripts/components/farmplantable.lua`, `scripts/actions.lua` (`PLANTSOIL`), `scripts/componentactions.lua` |
 | Fertilizing a bush/grass | `scripts/actions.lua` (`ACTIONS.FERTILIZE.fn`), `scripts/components/pickable.lua`, `scripts/components/fertilizer.lua`, `scripts/componentactions.lua` |
 | Components (general) | **`scripts/components/`** — not `scripts/` |
@@ -1159,6 +1160,37 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
 
 - `inventory:ForEachItem(fn, ...)` (`components/inventory.lua:667`).
 - `stackable:StackSize()` (`components/stackable.lua:59`).
+
+## Finding entities near a player
+
+Verified 2026-11-14 against the installed scripts.
+
+- **`TheSim:FindEntities(x, y, z, radius, musttags, excludetags)`** is the
+  engine's spatial query. Vanilla uses it for area effects:
+  `components/combat.lua:202` (share-target scan) and `combat.lua:1325` (area
+  attack). `musttags` / `excludetags` are arrays of tag strings (`nil` skips a
+  filter); it returns the entities within `radius` **world units** of
+  `(x, y, z)`. Get the player's coordinates from
+  `inst.Transform:GetWorldPosition()` (returns x, y, z). It is engine-bound and
+  lives in the server's Lua state, so a `require()`d module reaches it through
+  `GLOBAL.TheSim`.
+- **World units:** `TILE_SCALE = 4` (`constants.lua:17`), so a tile is 4 units.
+  One screen is roughly 8–10 tiles across (32–40 units). The mod's shared build
+  radius of 60 units is about 15 tiles — two neighbouring screens.
+- **Every buildable structure carries the `structure` tag**, so
+  `musttags = { "structure" }` excludes plants, creatures, and items:
+  - `prefabs/firepit.lua:161` — `inst:AddTag("structure")`.
+  - `prefabs/birdcage.lua:585` — `inst:AddTag("structure")`.
+  - `prefabs/cookpot.lua:288` — `inst:AddTag("structure")`. **Not every
+    placeable has it:** `prefabs/campfire.lua:144-151` adds `campfire`,
+    `cooker`, `NPC_workable`, `storytellingprop` and never `structure`, so a
+    `musttags = { "structure" }` scan never finds a campfire. A `shared` build
+    row for `campfire` therefore never auto-satisfies; only the player's own
+    `buildstructure` event completes it.
+  - `researchlab` / `researchlab2` are built by the factory in
+    `prefabs/scienceprototyper.lua`, which adds the tag at line 193 —
+    before `inst.entity:SetPristine()` at line 203 — so it exists on the
+    server entity like any other tag.
 
 ## Performance measurement (verified tooling)
 

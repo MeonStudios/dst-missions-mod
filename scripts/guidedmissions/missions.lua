@@ -9,7 +9,7 @@
 -- Objective types (full reference: docs/objectives.md):
 --   collect:      prefab, count              -> hold `count` of `prefab` (peak holdings)
 --   craft:        prefab, count              -> craft `count` inventory items
---   build:        prefab, count              -> place `count` structures
+--   build:        prefab, count, shared?     -> place `count` structures
 --   kill:         prefab, count              -> kill `count` of `prefab`
 --   trap_catch:   count, prefab?             -> check `count` sprung traps with a catch
 --   survive:      day                        -> reach this absolute world day
@@ -32,6 +32,10 @@
 -- products that can sit in the inventory (torch, spear); `buildstructure` fires
 -- for things placed in the world (firepit, researchlab). Use the wrong type for
 -- a prefab and that objective will never complete.
+--
+-- `shared = true` is valid only on a `build` row: with the Multiplayer Mode mod
+-- option on, a copy of the structure already standing nearby satisfies the row,
+-- so players sharing a base do not each build one. See docs/objectives.md.
 --
 -- `label` is required and carries no count: the tracker renders the counter
 -- separately (for example "Collect logs" with "0/10" beside it). `title` and
@@ -129,12 +133,12 @@ return {
         },
     },
     {
-        id = "science_machine",
+        id = "science",
         title = "Stience!",
         subtext = "Time to use your questionable intelligence.",
         hint = "Crafting a new recipe prototypes it and restores 15 sanity.",
         objectives = {
-            { type = "build", prefab = "researchlab", count = 1, label = "Build a Science Machine" },
+            { type = "build", prefab = "researchlab", count = 1, label = "Build a Science Machine", shared = true },
             { type = "prototype", count = 2, label = "Prototype recipes" },
         },
     },
@@ -153,7 +157,7 @@ return {
         title = "Home Is Where the Fire Is",
         subtext = "Wandering's fun, but that junk needs a home.",
         objectives = {
-            { type = "build", prefab = "firepit", count = 1, label = "Build a Fire Pit" },
+            { type = "build", prefab = "firepit", count = 1, label = "Build a Fire Pit", shared = true },
             { type = "build", prefab = "treasurechest", count = 1, label = "Build a Chest" },
         },
     },
@@ -171,7 +175,7 @@ return {
         subtext = "A pot, a rack, and questionable recipes.",
         hint = "Both need charcoal: burn a tree, then chop the burnt remains.",
         objectives = {
-            { type = "build", prefab = "cookpot", count = 1, label = "Build a Crock Pot" },
+            { type = "build", prefab = "cookpot", count = 1, label = "Build a Crock Pot", shared = true },
             { type = "build", prefab = "meatrack", count = 1, label = "Build a Drying Rack" },
             { type = "cookpot", count = 1, label = "Cook a meal in a Crock Pot" },
         },
@@ -219,11 +223,11 @@ return {
         },
     },
     {
-        id = "level_up",
+        id = "science_2",
         title = "Science 2.0",
         subtext = "The first machine was just a warm-up.",
         objectives = {
-            { type = "build", prefab = "researchlab2", count = 1, label = "Build an Alchemy Engine" },
+            { type = "build", prefab = "researchlab2", count = 1, label = "Build an Alchemy Engine", shared = true },
             { type = "prototype", count = 1, label = "Prototype a recipe" },
         },
     },
@@ -264,7 +268,7 @@ return {
         hint = "Build the cage first. A trap can be baited with seeds to catch a bird quickly.",
         objectives = {
             { type = "craft", prefab = "birdtrap", count = 1, label = "Craft a Bird Trap" },
-            { type = "build", prefab = "birdcage", count = 1, label = "Build a Birdcage" },
+            { type = "build", prefab = "birdcage", count = 1, label = "Build a Birdcage", shared = true },
         },
     },
     {

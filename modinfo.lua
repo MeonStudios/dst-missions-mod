@@ -41,6 +41,16 @@ configuration_options = {
         default = true,
     },
     {
+        name = "MULTIPLAYER_MODE",
+        label = "Multiplayer Mode",
+        hover = "Auto-complete a shared objectives, so players sharing a base don't have to complete each one.",
+        options = {
+            { description = "Enabled", data = true },
+            { description = "Disabled", data = false },
+        },
+        default = true,
+    },
+    {
         name = "EMERGENCY_FREQUENCY",
         label = "Emergency Repeat",
         hover = "How often an emergency mission may trigger for the same player.",

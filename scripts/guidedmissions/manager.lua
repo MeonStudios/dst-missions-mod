@@ -424,9 +424,11 @@ function GuidedMissionManager:ReconcileInventory()
     end
 end
 
--- Keep `reach_stat` rows on the live stat. Called from stat events, at Begin,
--- and once per second; this is why the required goal row on an emergency card
--- always matches the value that resolves it.
+-- Keep live rows current: `reach_stat` follows the live stat, and a `shared`
+-- build row counts equivalent structures standing nearby in Multiplayer Mode.
+-- Called from stat events, at Begin, and once per second; this is why the
+-- required goal row on an emergency card always matches the value that resolves
+-- it, and why a shared row checks as soon as a teammate's structure is in range.
 function GuidedMissionManager:RefreshLiveObjectives()
     local mission = self.current_mission
     if mission == nil then

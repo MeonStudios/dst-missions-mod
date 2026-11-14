@@ -96,6 +96,30 @@ STRINGS = { NAMES = {
     MEATBALLS = "Meatballs",
 } }
 TheWorld = { state = { cycles = 0 } }
+-- Nearby world entities for `shared` build rows. The stub filters by tag and
+-- radius the way the engine does, so the `structure` tag filter and the radius
+-- are exercised rather than mocked away. Entries:
+-- `{ prefab = "firepit", x = 0, z = 0, tags = { structure = true } }`.
+TheSim = {
+    entities = {},
+    FindEntities = function(_, x, y, z, radius, musttags)
+        local found = {}
+        for _, entity in ipairs(TheSim.entities) do
+            local tagged = true
+            for _, tag in ipairs(musttags or {}) do
+                if not (entity.tags or {})[tag] then
+                    tagged = false
+                end
+            end
+            local dx = (entity.x or 0) - x
+            local dz = (entity.z or 0) - z
+            if tagged and dx * dx + dz * dz <= radius * radius then
+                found[#found + 1] = entity
+            end
+        end
+        return found
+    end,
+}
 -- Only the identity of these action tables matters (workable.action is compared
 -- against ACTIONS.CHOP), so empty tables are enough.
 ACTIONS = { CHOP = {}, MINE = {}, DIG = {} }
@@ -182,6 +206,13 @@ local function NewInst(guid)
     function inst:DoTaskInTime(delay, fn)
         return NewTask(clock + delay, fn, nil, self)
     end
+    -- World position for proximity reads (shared build rows). A fixture may
+    -- set `inst.x` / `inst.z` before activation to stand elsewhere.
+    inst.Transform = {
+        GetWorldPosition = function()
+            return inst.x or 0, 0, inst.z or 0
+        end,
+    }
     function inst:GetDisplayName() return "Wilson" end
     function inst:IsValid() return true end
     function inst:Fire(event, data)
@@ -320,6 +351,12 @@ local function ValidateObjectiveFields(where, objective, index)
     Check(row .. " uses a known type", Objectives.VALID_TYPES[objective.type] == true)
     Check(row .. " optional flag is a boolean",
         objective.optional == nil or type(objective.optional) == "boolean")
+    -- Only `build` reads `shared`; setting it elsewhere is silently inert and
+    -- almost always a mistake (the row would never auto-complete).
+    Check(row .. " shared flag is a boolean",
+        objective.shared == nil or type(objective.shared) == "boolean")
+    Check(row .. " shared is only set on build rows",
+        objective.shared ~= true or objective.type == "build")
 
     if needs_prefab[objective.type] then
         Check(row .. " names a prefab id", IsPrefabId(objective.prefab))
@@ -1040,6 +1077,125 @@ for _, task in ipairs(tasks) do
 end
 Check("cleanup: all emergency tasks cancelled",
     cleanup_manager.emergency_hold_task == nil and emergency_live_tasks == 0)
+
+-- ---- multiplayer mode (shared build rows) --------------------------------
+--
+-- A `shared` build row is satisfied by an equivalent structure already standing
+-- nearby when Multiplayer Mode is on. The manager rereads it through
+-- Objectives.LiveProgress from InitialProgress (mission start) and the 1-second
+-- poll, so these drive the real manager; no shared or cross-player state exists.
+
+local function Place(prefab, x, z)
+    TheSim.entities[#TheSim.entities + 1] = {
+        prefab = prefab,
+        x = x or 0,
+        z = z or 0,
+        tags = { structure = true },
+    }
+end
+
+local function SharedBuildMission(count)
+    return {
+        id = "harness_shared_build",
+        title = "Shared Base",
+        subtext = "Someone already built it.",
+        objectives = {
+            { type = "build", prefab = "firepit", count = count or 1,
+              label = "Build a Fire Pit", shared = true },
+        },
+    }
+end
+
+local saved_multiplayer_mode = Settings.multiplayer_mode
+
+-- Option off: a nearby structure is ignored, exactly as before this feature.
+Settings.multiplayer_mode = false
+TheSim.entities = {}
+Place("firepit")
+local mp_off_manager, mp_off_player = Spawn()
+Activate(mp_off_manager, mp_off_player, SharedBuildMission(1))
+Check("shared build ignores a nearby structure with the option off",
+    Row(mp_off_player, 1)[3] == "0/1")
+Advance(1)
+Check("shared build stays unchecked with the option off",
+    State(mp_off_player) == "active" and Row(mp_off_player, 1)[4] == "0")
+
+-- Option on, nothing nearby: the row waits for a structure like any build row.
+Settings.multiplayer_mode = true
+TheSim.entities = {}
+local mp_empty_manager, mp_empty_player = Spawn()
+Activate(mp_empty_manager, mp_empty_player, SharedBuildMission(1))
+Check("shared build does not count with nothing nearby",
+    Row(mp_empty_player, 1)[3] == "0/1")
+Advance(1)
+Check("shared build stays active with nothing nearby",
+    State(mp_empty_player) == "active")
+
+-- Structure present at mission start: InitialProgress seeds the row done.
+Place("firepit")
+local mp_start_manager, mp_start_player = Spawn()
+Activate(mp_start_manager, mp_start_player, SharedBuildMission(1))
+Check("shared build counts at mission start", Row(mp_start_player, 1)[3] == "1/1")
+Check("shared build row renders done at mission start",
+    Row(mp_start_player, 1)[4] == "1")
+
+-- A different structure, or one without the `structure` tag, does not count.
+TheSim.entities = {}
+Place("researchlab")
+local mp_other_manager, mp_other_player = Spawn()
+Activate(mp_other_manager, mp_other_player, SharedBuildMission(1))
+Check("shared build ignores a different structure",
+    Row(mp_other_player, 1)[3] == "0/1")
+
+TheSim.entities = {}
+TheSim.entities[1] = { prefab = "firepit", x = 0, z = 0, tags = {} }
+local mp_tag_manager, mp_tag_player = Spawn()
+Activate(mp_tag_manager, mp_tag_player, SharedBuildMission(1))
+Check("shared build ignores untagged entities",
+    Row(mp_tag_player, 1)[3] == "0/1")
+
+-- Progress caps at the target: two copies do not render 2/1.
+TheSim.entities = {}
+Place("firepit")
+Place("firepit", 5, 5)
+local mp_cap_manager, mp_cap_player = Spawn()
+Activate(mp_cap_manager, mp_cap_player, SharedBuildMission(1))
+Check("shared build caps progress at the target",
+    Row(mp_cap_player, 1)[3] == "1/1")
+
+-- Structure appears mid-mission: the poll ticks the row and completes the
+-- mission through the usual `won` card and chat announcement.
+TheSim.entities = {}
+local mp_later_manager, mp_later_player = Spawn()
+Activate(mp_later_manager, mp_later_player, SharedBuildMission(1))
+Check("shared build waits for a teammate to build",
+    Row(mp_later_player, 1)[3] == "0/1")
+Place("firepit", 10, 10)
+Advance(1)
+Check("shared build ticks when a structure appears nearby",
+    Row(mp_later_player, 1)[3] == "1/1")
+Check("shared build completes the mission", State(mp_later_player) == "won")
+Check("shared build completion uses the normal card",
+    Read(mp_later_player)["guidedmissions.title"] == "Shared Base")
+Check("shared build completion is announced",
+    announcements[#announcements] == "Wilson completed: Shared Base")
+Advance(3)
+
+-- Sticky: leaving range never removes credit already earned.
+TheSim.entities = {}
+Place("firepit")
+local mp_sticky_manager, mp_sticky_player = Spawn()
+Activate(mp_sticky_manager, mp_sticky_player, SharedBuildMission(2))
+Check("shared build counts the nearby structure",
+    Row(mp_sticky_player, 1)[3] == "1/2")
+TheSim.entities[1].x = 1000
+Advance(1)
+Check("shared build keeps its progress after leaving range",
+    Row(mp_sticky_player, 1)[3] == "1/2")
+
+-- Restore the shared settings and world for the fixtures below.
+Settings.multiplayer_mode = saved_multiplayer_mode
+TheSim.entities = {}
 
 -- ---- objective type fixtures ---------------------------------------------
 --

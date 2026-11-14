@@ -17,6 +17,8 @@ Assets = {
 
 Settings.show_tracker = GetModConfigData("SHOW_TRACKER") ~= false
 Settings.announce_missions = GetModConfigData("ANNOUNCE_MISSIONS") ~= false
+-- Strict `== true`: an older or missing config entry keeps the option off.
+Settings.multiplayer_mode = GetModConfigData("MULTIPLAYER_MODE") == true
 
 -- Emergency repeat mode. Unknown values fall back to the default so an old or
 -- malformed config cannot disable the feature.

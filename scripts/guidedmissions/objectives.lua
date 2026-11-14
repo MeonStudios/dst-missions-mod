@@ -2,9 +2,17 @@
 local GLOBAL = _G
 
 local Conditions = require("guidedmissions/conditions")
+local Settings = require("guidedmissions/settings")
 local Strings = require("guidedmissions/strings")
 
 local Objectives = {}
+
+-- How close another copy of a `shared` structure has to stand to satisfy a
+-- build row. One screen is roughly 8-10 tiles across and TILE_SCALE is 4
+-- (scripts/constants.lua:17), so "1-2 screens" is about 32-80 units; 60 (15
+-- tiles) covers two neighbouring screens without reaching across a biome.
+-- See docs/dst-api.md, "Finding entities near a player".
+local SHARED_STRUCTURE_RADIUS = 45
 
 function Objectives.GetCurrentDay()
     local world = GLOBAL.TheWorld
@@ -27,6 +35,13 @@ end
 -- mission completion (`optional = true` in mission data).
 function Objectives.IsOptional(objective)
     return objective.optional == true
+end
+
+-- Shared build rows accept another player's copy of the structure when
+-- Multiplayer Mode is on (`shared = true` in mission data). Valid on `build`
+-- only: the same structure already standing nearby satisfies the row.
+function Objectives.IsShared(objective)
+    return objective.shared == true
 end
 
 -- The pre-formatted counter shown on the right of a tracker row. This is SOURCE
@@ -227,12 +242,52 @@ function Objectives.CountFoodInInventory(inst, objective)
     return count
 end
 
--- The current stat percentage (0-100) for a `reach_stat` row, or nil for any
--- other type or a missing component. The manager refreshes these on stat events
--- and once per second, so the row follows the live value rather than an
--- accumulated one.
+-- How many `prefab` structures stand within SHARED_STRUCTURE_RADIUS of the
+-- player. Reads world entities only; it never writes state. `structure` is the
+-- engine tag all buildable structures carry (docs/dst-api.md).
+local function CountNearbyStructures(inst, prefab)
+    local sim = GLOBAL.TheSim
+    local transform = inst ~= nil and inst.Transform or nil
+    if sim == nil or transform == nil or prefab == nil then
+        return 0
+    end
+
+    local x, y, z = transform:GetWorldPosition()
+    local entities = sim:FindEntities(
+        x, y, z, SHARED_STRUCTURE_RADIUS, { "structure" })
+    local count = 0
+    for _, entity in ipairs(entities or {}) do
+        if entity.prefab == prefab then
+            count = count + 1
+        end
+    end
+    return count
+end
+
+-- Live rows the manager rereads on stat events and once per second, so they
+-- follow current world state rather than an accumulated count:
+--   * `reach_stat` mirrors the live stat percentage (0-100);
+--   * a `shared` build row counts nearby copies of its structure when
+--     Multiplayer Mode is on.
+-- Returns nil for anything else (and for a shared row with nothing nearby), so
+-- the manager leaves that row's progress untouched. Nil rather than 0 is what
+-- makes shared progress sticky: walking away never unchecks a completed row.
 function Objectives.LiveProgress(inst, objective)
-    if objective == nil or objective.type ~= "reach_stat" then
+    if objective == nil then
+        return nil
+    end
+
+    if objective.type == "build" and Objectives.IsShared(objective)
+        and Settings.multiplayer_mode then
+        local nearby = CountNearbyStructures(inst, objective.prefab)
+        if nearby == 0 then
+            return nil
+        end
+        local target = tonumber(objective.count) or 1
+        return math.min(nearby, target)
+    end
+
+    if objective.type ~= "reach_stat" then
         return nil
     end
     local fraction = Conditions.GetStatFraction(inst, objective.stat)

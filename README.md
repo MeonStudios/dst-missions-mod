@@ -11,7 +11,7 @@ playthrough. Mission progress is server-authoritative and saved per player.
 2. Start DST, open **Mods**, and enable **Guided Missions**.
 3. Start or resume a world. All clients must have the mod installed.
 4. Optional: use **Mods → Configure** to toggle the tracker, completion announcements,
-   or the emergency repeat mode.
+   multiplayer mode, or the emergency repeat mode.
 
 ## Configure missions
 
@@ -64,6 +64,13 @@ the others but do not block the mission, which completes when the required objec
 are done. The card groups them below the required ones under an `Optional` heading and
 renders them dimmed; on the completion card their real state is shown, so an unfinished
 optional objective stays unchecked.
+
+A `build` row can set `shared = true` (only there). With **Multiplayer Mode** enabled
+in Mods → Configure, that row also counts an equivalent structure already standing
+within about 15 tiles, so players sharing a base do not each build a fire pit or a
+Science Machine; it stays checked once counted. With the option off, `shared` does
+nothing. Rows with player-specific work (chests, prototypes, traps) should not be
+shared.
 
 The full reference — every field, default icon, and matching rule — is in
 [`docs/objectives.md`](docs/objectives.md).
@@ -243,6 +250,9 @@ items.
 - Missions advance automatically when all objectives are complete.
 - A low-health or low-sanity **emergency** can replace the card; it resolves by itself
   when the stat recovers, and the interrupted mission resumes with its progress intact.
+- With **Multiplayer Mode** on, a shared `build` objective (a fire pit, Science
+  Machine, and so on) checks if that structure already stands near you, so one player's
+  build serves the group. Every player still has their own mission progress.
 - Mission completions are announced in chat (can be disabled). Mission starts and
   emergency pop-ups are not announced — the tracker already shows them.
 - After the last mission the tracker shows **All missions complete!**
@@ -260,7 +270,9 @@ items.
 
 ## Known limitations
 
-- Progress is per player; there is no shared or team mission state.
+- Progress is per player; there is no shared or team mission state. Multiplayer Mode
+  only lets a `shared` build row count a nearby structure — it does not share progress
+  or completion between players.
 - `collect` rereads the inventory one tick after an inventory event and only counts the
   player's inventory, equipped items, cursor item, and worn backpack — not chests. An
   item gained and spent before that reread runs can be missed.
@@ -279,5 +291,6 @@ items.
 ## Roadmap
 
 Mission sets selectable via mod options; an admin command to skip the current mission;
-shared progress; `visit`, `feed`, and `give item` objective types; an external JSON
-mission loader; mission-pack translations; more shipped languages.
+full shared progress (Multiplayer Mode only auto-satisfies nearby shared build rows);
+`visit`, `feed`, and `give item` objective types; an external JSON mission loader;
+mission-pack translations; more shipped languages.
