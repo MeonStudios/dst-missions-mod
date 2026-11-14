@@ -1,7 +1,8 @@
 @echo off
-REM Every offline check in one go: syntax, manager harness, modmain harness.
-REM Stops at the first failure. Rendering/HUD still needs tests\preview\run.sh and
-REM engine behaviour still needs a human in-game run (see CLAUDE.md).
+REM Every offline check in one go: syntax, l10n harness, l10n manifest,
+REM manager harness, modmain harness. Stops at the first failure. Rendering/HUD
+REM still needs tests\preview\run.sh and engine behaviour still needs a human
+REM in-game run (see CLAUDE.md).
 REM
 REM Call it from the repo root as:  .\verify
 REM Override the interpreters with LUA=... / LUAC=... in the environment.
@@ -20,6 +21,16 @@ for /r %%f in (*.lua) do (
 )
 if "!FAILED!"=="1" goto :fail
 echo ok
+
+echo == l10n harness ==
+"%LUA%" "tests\l10n_test.lua"
+if errorlevel 1 set "FAILED=1"
+if "!FAILED!"=="1" goto :fail
+
+echo == l10n manifest ==
+"%LUA%" "tools\gen_l10n.lua" --check
+if errorlevel 1 set "FAILED=1"
+if "!FAILED!"=="1" goto :fail
 
 echo == manager harness ==
 "%LUA%" "tests\manager_test.lua"

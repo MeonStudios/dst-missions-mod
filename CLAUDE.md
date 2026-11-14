@@ -9,17 +9,23 @@ Lua 5.1/LuaJIT semantics. No build step: this directory *is* the mod folder.
 
 | File | Role |
 |---|---|
-| `scripts/guidedmissions/missions.lua` | The mission chain. Normally the only file you edit; the objective schema and every option are in `docs/objectives.md`. |
+| `scripts/guidedmissions/missions.lua` | The mission chain. Normally the only data file you edit; the objective schema and every option are in `docs/objectives.md`. **Text edits also require updating the locale files — see the translation invariant below.** |
 | `scripts/guidedmissions/emergencies.lua` | Emergency pop-up missions. Separate from the ordered chain; the schema is in `docs/emergencies.md`. |
 | `scripts/guidedmissions/conditions.lua` | Shared stat reads and threshold-string parsing for emergency conditions and `reach_stat` rows. |
 | `scripts/guidedmissions/manager.lua` | Server state machine, event listeners, emergency overlay, `OnSave`/`OnLoad`. |
 | `scripts/guidedmissions/objectives.lua` | Objective labels, progress, matching, completion. |
+| `scripts/guidedmissions/l10n.lua` | Per-client translation lookup, locale resolution/aliases, fallback, the pack registration seam, and the width estimator used by tests. |
+| `scripts/guidedmissions/strings.lua` | User-facing text authored in code (heading, completion card, chat formats, day-counter format). Every new code string goes here. |
+| `scripts/guidedmissions/languages/*.lua` | Locale tables keyed by the English source string. `en.lua` is **generated**; the other files are handwritten translations. |
+| `docs/localization.md` | How translations work, the width budgets, adding a language, and the future pack seam. |
 | `docs/objectives.md` | Reference for every objective type: fields, defaults, icons, matching rules. **Update it (and the README table) in the same change whenever a type is added or edited.** |
 | `docs/emergencies.md` | Reference for emergency missions: trigger/resolve conditions, optional objectives, repeat modes. |
 | `scripts/guidedmissions/netvars.lua` | Every netvar name plus the attach/read/write helpers. |
 | `scripts/guidedmissions/settings.lua` | Runtime settings, populated from mod options in `modmain.lua`. |
 | `scripts/widgets/guidedmissiontracker.lua` | Client HUD. Renders the netvar string contract as a mission card (crafting-menu frame, item icons, green checks; `emergency` state forces the card open with a red title); no game logic. |
 | `tests/manager_test.lua` | Plain-Lua logic harness for the server manager. Stubs DST globals and replays the full chain; never loaded by the game. |
+| `tests/l10n_test.lua` | Checks locale coverage, fallback/aliases, placeholder parity, encoding, and the per-field width budgets. Never loaded by the game. |
+| `tools/gen_l10n.lua` | Regenerates `languages/en.lua` from the mission data and `strings.lua`; `--check` fails when it is stale. |
 | `tests/modmain_test.lua` | Loads the real `modmain.lua` in a sandbox matching DST's mod env (notably **no `tonumber`**) and drives the console commands / RPC handlers. Never loaded by the game. |
 | `tests/preview/` | Offline HUD preview: runs the real tracker with stubbed widgets and renders PNGs from the game's atlases/fonts. |
 
@@ -31,11 +37,20 @@ Lua 5.1/LuaJIT semantics. No build step: this directory *is* the mod folder.
 - **Authority is server-side.** The server writes `title`, `subtext`, `rows`, and `state`
   as netvar strings; clients only render them and never send progress back. The HUD is a
   renderer of that string contract, not a second source of truth.
+- **Netvars carry SOURCE text, never translations.** Each client translates at render
+  time with its own locale; the server translates only its own chat/log composition.
+  Never wrap a netvar value in `L10n.L`, and never call `L` inside `Log`/`Announce`.
 - **Information only — no gameplay impact.** The mod observes events and world state and
   displays guidance. It must never spawn items, grant rewards, modify stats, or otherwise
   change game state. Mission completion only advances the tracker.
 - **Save state is keyed by mission id, not array index**, so inserting or reordering
   missions does not corrupt existing progress. Ids must be unique and stable.
+- **Editing mission text means updating every translation.** `title`, `subtext`, `hint`,
+  `resolved_subtext`, and objective `label` are translation keys, so any change (or any
+  new code string in `strings.lua`) invalidates `languages/en.lua`. Regenerate it with
+  `tools/gen_l10n.lua`, then update every shipped locale (`es`, `pt`, `de`, `fr`, `it`,
+  `pl`, `ru`, `ko`, `ja`, `zh`, `zht`); the l10n harness fails until every shipped locale
+  covers the keys and fits the width budgets. See `docs/localization.md`.
 - **Cancel periodic tasks in `OnRemoveFromEntity`.**
 - Mission data loads at startup. Editing `missions.lua` needs a server restart (or
   disable/enable the mod); there is no live reload.
@@ -66,7 +81,8 @@ junction is missing (e.g. after a reinstall), recreate it with `mklink /J` from 
 elevated prompt. It only helps this machine; other players need their own copy.
 
 - **Run every offline check at once** before asking the user to test in-game — syntax,
-  manager harness, modmain harness. Stops at the first failure and exits non-zero:
+  l10n harness, l10n manifest, manager harness, modmain harness. Stops at the first
+  failure and exits non-zero:
 
   ```powershell
   .\verify
@@ -107,6 +123,17 @@ elevated prompt. It only helps this machine; other players need their own copy.
   It is a logic check only — rendering, netvar replication, and engine API behavior are
   still verified only by a human running the game.
 
+- **Run the l10n harness** when touching mission text, `strings.lua`, a locale file, or
+  `l10n.lua`. It checks every shipped locale for missing/stale/duplicate keys, BOM/CRLF
+  and mojibake, placeholder parity, fallback and alias behavior, and the per-field width
+  budgets (title 27, subtext 52, label 28, hint 80 weighted columns; CJK counts 3).
+  After editing any source text, regenerate the English manifest first:
+
+  ```bash
+  "/c/Program Files (x86)/Lua/5.1/lua.exe" tools/gen_l10n.lua
+  "/c/Program Files (x86)/Lua/5.1/lua.exe" tests/l10n_test.lua
+  ```
+
 - **Run the modmain harness** when touching `modmain.lua` (especially the console
   commands or anything that later runs in the mod environment):
 
@@ -129,12 +156,15 @@ elevated prompt. It only helps this machine; other players need their own copy.
   sh tests/preview/run.sh
   ```
 
-  Outputs `tests/preview/out/{active_2row,hint_2row,hint_open,trap_1row,optional_3row,sanity_2row,heal_2row,emergency_2row,active_1row,won,done,collapsed}.png`. Requires
-  Pillow (`pip install pillow`). The game data path defaults to the Steam install and is
-  overridable with `--game-data` or `DST_DATA`. Because it records the real widget, layout
-  changes show up without duplicating constants. It does not exercise input, netvars, or
-  the engine's exact glyph hinting — those still need an in-game run. Add a scenario in
-  `tests/preview/dump.lua` when you need another state.
+  Outputs `tests/preview/out/{active_2row,hint_2row,hint_open,trap_1row,optional_3row,sanity_2row,heal_2row,emergency_2row,active_1row,won,done,collapsed,de_active_2row,de_hint_open,de_optional_3row,de_day_1row,de_done,ru_active_2row,ru_day_1row,zh_active_2row,zh_day_1row}.png`. The `de_*` cases translate real source payloads with the shipped German table. Requires
+  Pillow (`pip install pillow`). The `de_*`/`ru_*`/`zh_*` cases translate real source
+  payloads with the shipped tables; the renderer loads DST's fallback outline fonts
+  (including packed BMFont channel decoding) so Cyrillic and CJK are visible, though
+  their glyph composition is approximate. The game data path defaults to the Steam
+  install and is overridable with `--game-data` or `DST_DATA`. Because it records the
+  real widget, layout changes show up without duplicating constants. It does not
+  exercise input, netvars, or the engine's exact glyph hinting — those still need an
+  in-game run. Add a scenario in `tests/preview/dump.lua` when you need another state.
 
   This is a **parser check only** — it does not execute the mod, so it will not catch
   runtime errors, wrong engine-API assumptions, or `strict.lua` undeclared-global errors.
@@ -233,8 +263,15 @@ before ours).
 
 ## Conventions
 
-- Use prefab ids in mission data (`log`, `firepit`, `researchlab`). Resolve display names
-  through `STRINGS.NAMES` with a fallback so a custom prefab cannot crash the tracker.
+- Use prefab ids in mission data (`log`, `firepit`, `researchlab`) for matching and
+  icons. Display names live inside the translated `label`/`hint` sentences, so
+  translators translate the whole sentence; the tracker never looks up `STRINGS.NAMES`.
+- **Text is localized per client.** Every new user-visible string goes in mission data
+  or `strings.lua`, then `tools/gen_l10n.lua` must be rerun and every shipped locale
+  (`es`/`pt`/`de`/`fr`/`it`/`pl`/`ru`/`ko`/`ja`/`zh`/`zht`) updated. Source text is the
+  translation key: keep it single-line and free of `|`,
+  `;`, quotes, and newlines, and stay within the width budgets (see
+  `docs/localization.md`). Netvars carry source text; only `Log`/`Announce` call `L`.
 - Keep netvar names in `netvars.lua` only, prefixed `guidedmissions.`.
 - `GLOBAL` exists only in the modmain environment. Files loaded with `require()` (everything
   under `scripts/`) must use `local GLOBAL = _G`; DST's strict mode errors on `GLOBAL`

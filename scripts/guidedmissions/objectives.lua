@@ -2,6 +2,7 @@
 local GLOBAL = _G
 
 local Conditions = require("guidedmissions/conditions")
+local Strings = require("guidedmissions/strings")
 
 local Objectives = {}
 
@@ -28,11 +29,13 @@ function Objectives.IsOptional(objective)
     return objective.optional == true
 end
 
--- The pre-formatted counter shown on the right of a tracker row.
+-- The pre-formatted counter shown on the right of a tracker row. This is SOURCE
+-- text: the client formats the day counter in its own language from the numbers
+-- GetCounterMeta supplies (see FormatRows in manager.lua).
 function Objectives.GetCounter(objective, progress)
     if objective.type == "survive" then
         local target = tonumber(objective.day) or 1
-        return string.format("Day %d/%d", Objectives.GetCurrentDay(), target)
+        return string.format(Strings.DAY_COUNTER_FMT, Objectives.GetCurrentDay(), target)
     end
 
     if objective.type == "reach_stat" then
@@ -53,6 +56,18 @@ function Objectives.GetCounter(objective, progress)
     -- points. `%d` would truncate anyway, but this makes it explicit.
     local value = math.floor(math.min(tonumber(progress) or 0, target))
     return string.format("%d/%d", value, target)
+end
+
+-- Extra row fields for counters the client must format itself, because the
+-- counter contains a translated word. Returns kind, current, target; kind == ""
+-- means the pre-formatted counter is language-neutral and is rendered as-is.
+-- The day counter is the only one today ("Day %d/%d"): ratios and percentages
+-- are pure numbers in every language.
+function Objectives.GetCounterMeta(objective, progress)
+    if objective.type == "survive" then
+        return "day", Objectives.GetCurrentDay(), tonumber(objective.day) or 1
+    end
+    return "", nil, nil
 end
 
 -- The prefab whose inventory icon illustrates this objective, or nil when the

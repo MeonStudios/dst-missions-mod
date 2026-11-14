@@ -177,6 +177,39 @@ completion. **Mods → Configure → Emergency Repeat** controls whether the sam
 may fire every time, once per session (default), or once per server/world — per player.
 The full schema is in [`docs/emergencies.md`](docs/emergencies.md).
 
+## Localization
+
+The mod ships **English, Spanish, Brazilian Portuguese, German, French, Italian, Polish,
+Russian, Korean, Japanese, Simplified Chinese, and Traditional Chinese**. Each player
+sees the tracker in their own game language: the server sends the authored English text
+and every client translates it locally. Completion chat stays in the server's language,
+like vanilla DST announcements. `zhr` (WeGame Simplified) shares the Simplified Chinese
+table and `mex` (Latin American Spanish) shares the Spanish table. The Japanese table is
+dormant: DST's locale list has the `ja` entry commented out, so no client selects it yet.
+
+On Steam the in-game menu only offers English and the two Chinese languages; every other
+language is a Workshop language-pack mod. Those packs do not change `LOC`, so the mod
+detects them through `LanguageTranslator.defaultlang` and still translates per client.
+
+Translations live in
+[`scripts/guidedmissions/languages/`](scripts/guidedmissions/languages/). The English
+file is generated and is the translator template:
+
+```bash
+lua tools/gen_l10n.lua     # regenerate languages/en.lua after text edits
+```
+
+To add a language, copy `en.lua` to `<code>.lua`, translate the values (keys must stay
+byte-for-byte), add the code to `L10n.BUILTIN_LOCALES` in `l10n.lua` and to `SHIPPED` in
+`tests/l10n_test.lua`, then run `.\verify`. `zhr` (WeGame Simplified) shares the
+Simplified Chinese table and `mex` (Latin American Spanish) shares the Spanish table.
+Translations must stay inside the per-field
+width budgets (title 27, subtext 52, label 28, hint 80 columns; CJK glyphs count
+triple) — reword rather than growing the card. Editing an English string orphans its
+translations until every locale file is updated; the tests fail until they are, and the
+game always falls back to English. The full workflow and API are in
+[`docs/localization.md`](docs/localization.md).
+
 ## Retest with admin commands
 
 As an admin (the host in a locally hosted world), open the debug console with `~`
@@ -238,10 +271,13 @@ items.
 - Emergency objectives are all optional, so every emergency row sits under the
   `Optional` heading.
 - "Once per server" emergency tracking is per player, not shared by the group.
-- No localization, no custom icons, no mission editor UI.
+- Chat and log lines follow the server language; only the HUD follows each client.
+- Japanese is shipped but dormant until DST enables its `ja` locale; other unshipped
+  locales fall back to English.
+- No custom icons and no mission editor UI.
 
 ## Roadmap
 
 Mission sets selectable via mod options; an admin command to skip the current mission;
 shared progress; `visit`, `feed`, and `give item` objective types; an external JSON
-mission loader.
+mission loader; mission-pack translations; more shipped languages.

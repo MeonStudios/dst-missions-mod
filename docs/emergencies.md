@@ -68,6 +68,13 @@ grants rewards, or changes a stat — it only swaps what the tracker displays.
 | `resolve` | yes | Condition that ends it. Must use the same `stat` as `trigger`. |
 | `objectives` | yes | Exactly one required `reach_stat` goal row matching `resolve`, plus any number of **optional** guidance rows. |
 
+`title`, `subtext`, `resolved_subtext`, `hint`, and every `label` are **translation
+keys**. Author them in English, keep them single-line, and stay within the card's width
+budgets (title 27, subtext 52, label 28, hint 80 weighted columns; CJK counts 3).
+Changing an English string orphans its translations until the locale files are updated.
+After editing text, run `lua tools/gen_l10n.lua` and translate the new keys; see
+[`localization.md`](localization.md).
+
 ## Conditions and thresholds
 
 A condition is `{ kind, stat, threshold }`. `kind = "stat"` is the only kind today;

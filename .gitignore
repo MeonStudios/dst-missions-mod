@@ -8,3 +8,7 @@ Thumbs.db
 tests/preview/out/
 tests/preview/out.json
 docs/mission-ideas.md
+
+# Python bytecode
+__pycache__/
+*.pyc

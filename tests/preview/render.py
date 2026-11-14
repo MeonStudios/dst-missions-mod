@@ -32,6 +32,19 @@ FONT_FILES = {
     "spirequal_outline": "fonts/spirequal_outline.zip",
 }
 
+# DST renders characters missing from the primary font through an outline
+# fallback (scripts/fonts.lua DEFAULT_FALLBACK_TABLE_OUTLINE): a small Noto set
+# for Cyrillic/Greek and a full Noto CJK set. The primary atlases here are
+# Latin-only, so without these Russian and Chinese previews render blank.
+FALLBACK_FONT_FILES = [
+    "fonts/fallback_outline.zip",
+    "fonts/fallback_full_outline_packed.zip",
+]
+
+# BMFont packed mode: chnl bits are 1=blue, 2=green, 4=red, 8=alpha. Map each
+# to the index yielded by Image.split() on an RGBA image.
+PACKED_CHANNELS = {1: 2, 2: 1, 4: 0, 8: 3}
+
 BG_COLOUR = (42, 33, 24, 255)
 RESAMPLE = getattr(Image, "Resampling", Image).LANCZOS
 ROTATE_RESAMPLE = getattr(Image, "Resampling", Image).BICUBIC
@@ -109,8 +122,18 @@ class Ktex:
 
     def base_pixels(self):
         """Decode the top mip to a top-down RGBA bytearray."""
+        if self.compression == 4:
+            # Raw RGBA mip (the packed CJK fallback font uses this). Stored
+            # rows are bottom-up, like every other KTEX mip.
+            w, h, _, size = self.mips[0]
+            src = self.data[:size]
+            out = bytearray(w * h * 4)
+            row = w * 4
+            for y in range(h):
+                out[y * row:(y + 1) * row] = src[(h - 1 - y) * row:(h - y) * row]
+            return w, h, out
         if self.compression != 2:
-            raise NotImplementedError("only DXT5 KTEX is supported (found %d)" % self.compression)
+            raise NotImplementedError("unsupported KTEX compression %d" % self.compression)
         w, h, _, size = self.mips[0]
         src = self.data[:size]
         stride_blocks = w // 4
@@ -132,8 +155,18 @@ class Ktex:
 
     def region(self, x1, y1, x2, y2):
         """Crop in stored-texture coordinates, returned in display (top-down) orientation."""
+        if self.compression == 4:
+            w, h, _, size = self.mips[0]
+            src = self.data[:size]
+            cw, ch = x2 - x1, y2 - y1
+            out = bytearray(cw * ch * 4)
+            for dy in range(ch):
+                y = y2 - 1 - dy
+                start = (y * w + x1) * 4
+                out[dy * cw * 4:(dy + 1) * cw * 4] = src[start:start + cw * 4]
+            return Image.frombytes("RGBA", (cw, ch), bytes(out))
         if self.compression != 2:
-            raise NotImplementedError("only DXT5 KTEX is supported")
+            raise NotImplementedError("unsupported KTEX compression %d" % self.compression)
         w, h, _, size = self.mips[0]
         src = self.data[:size]
         stride_blocks = w // 4
@@ -168,6 +201,7 @@ class GameData:
         self._frame_cache = {}
         self._image_cache = {}
         self._font_cache = {}
+        self._fallback_fonts = None
 
     def frames(self, atlas_path):
         if atlas_path not in self._frame_cache:
@@ -206,12 +240,7 @@ class GameData:
         self._image_cache[key] = img
         return img
 
-    def font(self, name):
-        if name in self._font_cache:
-            return self._font_cache[name]
-        inner_path = FONT_FILES.get(name)
-        if inner_path is None:
-            raise KeyError("unknown font %r" % name)
+    def _load_font(self, inner_path):
         inner = zipfile.ZipFile(io.BytesIO(self.fonts_zip.read(inner_path)))
         fnt = ET.fromstring(inner.read("font.fnt"))
         info = fnt.find("info")
@@ -223,19 +252,45 @@ class GameData:
                 "w": int(ch.get("width")), "h": int(ch.get("height")),
                 "xo": int(ch.get("xoffset")), "yo": int(ch.get("yoffset")),
                 "xa": int(ch.get("xadvance")),
+                # BMFont packed mode: up to four glyphs share one rectangle,
+                # one per texture channel; this picks the channel.
+                "chnl": int(ch.get("chnl") or 0),
             }
         atlas = Ktex(inner.read("font.tex"))
         w, h, pixels = atlas.base_pixels()
         image = Image.frombytes("RGBA", (w, h), bytes(pixels))
-        font = {
+        return {
             "size": int(info.get("size")),
             "line_height": int(common.get("lineHeight")),
             "base": int(common.get("base")),
             "chars": chars,
             "image": image,
+            # Raw-RGBA atlases (the packed CJK fallback) store glyph coverage
+            # in a channel instead of the usual RGB face/outline; DXT5 atlases
+            # bake the glyph face and outline into RGB instead.
+            "alpha_only": atlas.compression == 4,
+            "packed": common.get("packed") == "1",
         }
+
+    def font(self, name):
+        if name in self._font_cache:
+            return self._font_cache[name]
+        inner_path = FONT_FILES.get(name)
+        if inner_path is None:
+            raise KeyError("unknown font %r" % name)
+        font = self._load_font(inner_path)
         self._font_cache[name] = font
         return font
+
+    def fallback_fonts(self):
+        if self._fallback_fonts is None:
+            available = set(self.fonts_zip.namelist())
+            self._fallback_fonts = [
+                self._load_font(path)
+                for path in FALLBACK_FONT_FILES
+                if path in available
+            ]
+        return self._fallback_fonts
 
 
 # --------------------------------------------------------------------------
@@ -304,18 +359,38 @@ class Renderer:
         text = node.get("string") or ""
         if text == "":
             return
-        font = self.game.font(node["font"])
-        scale = node["size"] / float(font["size"]) * sx
+        primary = self.game.font(node["font"])
+        # Per-glyph resolution: the primary font first, then DST's outline
+        # fallbacks. A glyph's own font also supplies its scale, because the
+        # fallbacks are authored at a different point size.
+        fonts = [primary] + self.game.fallback_fonts()
+
+        def resolve(char):
+            codepoint = ord(char)
+            for candidate in fonts:
+                glyph = candidate["chars"].get(codepoint)
+                if glyph is not None:
+                    return candidate, glyph
+            return None, None
+
+        def glyph_scale(font):
+            return node["size"] / float(font["size"]) * sx
+
+        scale = glyph_scale(primary)
         if scale == 0:
             return
-        line_h = font["line_height"] * scale
+        line_h = primary["line_height"] * scale
         # DST Text honours embedded newlines; the hint tooltip is wrapped by the
         # tracker into such a string. Align and centre the block as a whole.
         lines = text.split("\n")
-        line_widths = [
-            sum(font["chars"].get(ord(c), {}).get("xa", 0) for c in line) * scale
-            for line in lines
-        ]
+        line_widths = []
+        for line in lines:
+            total = 0.0
+            for c in line:
+                font, glyph = resolve(c)
+                if glyph is not None:
+                    total += glyph["xa"] * glyph_scale(font)
+            line_widths.append(total)
         total_w = max(line_widths) if line_widths else 0
         total_h = line_h * len(lines)
         region_w = node.get("region_w") or total_w
@@ -344,13 +419,14 @@ class Renderer:
             line_top = block_top - line_index * line_h
 
             for ch in line:
-                glyph = font["chars"].get(ord(ch))
+                glyph_font, glyph = resolve(ch)
                 if glyph is None:
                     continue
-                gw = max(1, int(round(glyph["w"] * scale * self.S)))
-                gh = max(1, int(round(glyph["h"] * scale * self.S)))
+                gscale = glyph_scale(glyph_font)
+                gw = max(1, int(round(glyph["w"] * gscale * self.S)))
+                gh = max(1, int(round(glyph["h"] * gscale * self.S)))
                 if glyph["w"] > 0 and glyph["h"] > 0:
-                    crop = font["image"].crop(
+                    crop = glyph_font["image"].crop(
                         (glyph["x"], glyph["y"], glyph["x"] + glyph["w"], glyph["y"] + glyph["h"])
                     ).resize((gw, gh), RESAMPLE).convert("RGBA")
                     # The BMFont atlases bake the outline into the RGB channels:
@@ -360,20 +436,37 @@ class Renderer:
                     # would colour the outline too and lose it (letters look fat).
                     ca_i = ca
                     tile = Image.new("RGBA", (gw, gh))
-                    tile.putdata([
-                        (
-                            r * cr // 255,
-                            g * cg // 255,
-                            b * cb // 255,
-                            int(a * ca_i),
-                        )
-                        for (r, g, b, a) in crop.getdata()
-                    ])
-                    gx_center = pen + (glyph["xo"] + glyph["w"] / 2) * scale
-                    gy_center = line_top - (glyph["yo"] + glyph["h"] / 2) * scale
+                    if glyph_font["packed"]:
+                        # Packed BMFont: the glyph is one channel of the
+                        # rectangle, not the RGB face.
+                        channel = PACKED_CHANNELS.get(glyph.get("chnl"), 3)
+                        mask = crop.split()[channel]
+                        tile.putdata([
+                            (cr, cg, cb, int(v * ca_i))
+                            for v in mask.getdata()
+                        ])
+                    elif glyph_font["alpha_only"]:
+                        # Alpha is the coverage; paint the glyph in the text
+                        # colour instead of trusting the noisy RGB channels.
+                        tile.putdata([
+                            (cr, cg, cb, int(a * ca_i))
+                            for (_, _, _, a) in crop.getdata()
+                        ])
+                    else:
+                        tile.putdata([
+                            (
+                                r * cr // 255,
+                                g * cg // 255,
+                                b * cb // 255,
+                                int(a * ca_i),
+                            )
+                            for (r, g, b, a) in crop.getdata()
+                        ])
+                    gx_center = pen + (glyph["xo"] + glyph["w"] / 2) * gscale
+                    gy_center = line_top - (glyph["yo"] + glyph["h"] / 2) * gscale
                     cxp, cyp = self.to_px(gx_center, gy_center)
                     self.paste_clipped(tile, cxp - gw / 2, cyp - gh / 2, clip)
-                pen += glyph["xa"] * scale
+                pen += glyph["xa"] * gscale
 
     def draw(self, node, px, py, psx, psy, clip):
         if not node.get("shown", True):

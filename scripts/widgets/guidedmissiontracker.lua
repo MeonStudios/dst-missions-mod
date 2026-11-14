@@ -22,6 +22,8 @@ local ImageButton = require("widgets/imagebutton")
 local UIAnim = require("widgets/uianim")
 
 local Netvars = require("guidedmissions/netvars")
+local L10n = require("guidedmissions/l10n")
+local Strings = require("guidedmissions/strings")
 
 local CRAFTING_ATLAS = "images/crafting_menu.xml"
 local UI_ATLAS = "images/ui.xml"
@@ -692,6 +694,7 @@ function MissionTracker:ParseRows(payload)
         if raw ~= "" then
             local parts = Split(raw, "|")
             rows[#rows + 1] = {
+                -- Source text: translated at render time (BuildRows).
                 label = parts[1] or "",
                 prefab = parts[2] or "",
                 counter = parts[3] or "",
@@ -699,10 +702,29 @@ function MissionTracker:ParseRows(payload)
                 -- Appended field; a payload from before optional objectives
                 -- simply has no fifth part and reads as required.
                 optional = parts[5] == "1",
+                -- Appended fields 6-8, present only on survive rows: "day" plus
+                -- the current and target day, so this client can format the
+                -- counter in its own language. Older servers omit them, and the
+                -- pre-formatted `counter` above is used as the fallback.
+                counter_kind = parts[6] ~= nil and parts[6] ~= "" and parts[6] or nil,
+                counter_current = tonumber(parts[7]),
+                counter_target = tonumber(parts[8]),
             }
         end
     end
     return rows
+end
+
+-- The counter text for a row. Only the day counter contains a word, so it is
+-- rebuilt here from the numbers the server sent; every other counter is a
+-- language-neutral "current/target" or percentage string.
+function MissionTracker:FormatCounter(row)
+    if row.counter_kind == "day"
+        and row.counter_current ~= nil and row.counter_target ~= nil then
+        return L10n.Lfmt(Strings.DAY_COUNTER_FMT,
+            row.counter_current, row.counter_target)
+    end
+    return row.counter or ""
 end
 
 -- Add the icon for a row's id at (x, y). Returns true when one was drawn.
@@ -793,7 +815,7 @@ function MissionTracker:BuildRows(rows)
             y_cursor = y_cursor - OPTIONAL_HEADER_H
 
             local header = self.row_root:AddChild(
-                Text(UIFONT, 20, "Optional", UICOLOURS.HIGHLIGHT_GOLD))
+                Text(UIFONT, 20, L10n.L(Strings.OPTIONAL), UICOLOURS.HIGHLIGHT_GOLD))
             header:SetRegionSize(COLUMNS.subtext_w, OPTIONAL_HEADER_H)
             header:SetHAlign(ANCHOR_LEFT)
             header:SetVAlign(ANCHOR_MIDDLE)
@@ -818,7 +840,7 @@ function MissionTracker:BuildRows(rows)
             local counter_colour = row.optional and UICOLOURS.GOLD_UNIMPORTANT
                 or UICOLOURS.IVORY
             local counter = self.row_root:AddChild(
-                Text(BODYTEXTFONT, 24, row.counter, counter_colour))
+                Text(BODYTEXTFONT, 24, self:FormatCounter(row), counter_colour))
             counter:SetVAlign(ANCHOR_MIDDLE)
             counter_w = counter:GetRegionSize()
             counter:SetPosition(COLUMNS.right - counter_w / 2, y)
@@ -846,7 +868,8 @@ function MissionTracker:BuildRows(rows)
         local label_w = label_right - label_left
         local colour = row.done and UICOLOURS.IVORY_70
             or (row.optional and UICOLOURS.GOLD_UNIMPORTANT or UICOLOURS.IVORY)
-        local label = self.row_root:AddChild(Text(UIFONT, 22, row.label, colour))
+        local label = self.row_root:AddChild(
+            Text(UIFONT, 22, L10n.L(row.label), colour))
         label:SetRegionSize(label_w, ROW_H)
         label:SetHAlign(ANCHOR_LEFT)
         label:SetVAlign(ANCHOR_MIDDLE)
@@ -928,7 +951,11 @@ function MissionTracker:SetHint(hint)
 end
 
 function MissionTracker:SetContent(state, rows)
-    local hint = state.hint or ""
+    -- The server sends source text; translate here, before measuring the title
+    -- and wrapping the hint, so the layout fits this client's language.
+    local title = L10n.L(state.title)
+    local subtext = L10n.L(state.subtext)
+    local hint = L10n.L(state.hint)
     local emergency = state.state == "emergency"
 
     -- An emergency borrows the same card but tints the title red, so the pop-up
@@ -942,7 +969,7 @@ function MissionTracker:SetContent(state, rows)
     -- The "?" sits immediately after the title, so measure the rendered title
     -- first. ResetRegionSize makes GetRegionSize return the text extent rather
     -- than the previous layout's region; Layout sets the region again.
-    self.card_title:SetString(state.title)
+    self.card_title:SetString(title)
     self.card_title:ResetRegionSize()
     local title_width = self.card_title:GetRegionSize()
 
@@ -955,8 +982,8 @@ function MissionTracker:SetContent(state, rows)
     end
 
     self:Layout(#rows, hint ~= "", title_width, has_optional)
-    self.strip_title:SetString(state.title)
-    self.card_subtext:SetString(state.subtext or "")
+    self.strip_title:SetString(title)
+    self.card_subtext:SetString(subtext)
     self:SetHint(hint)
     self:BuildRows(rows)
 end

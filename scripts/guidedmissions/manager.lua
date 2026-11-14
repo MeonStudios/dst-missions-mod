@@ -6,6 +6,8 @@ local Emergencies = require("guidedmissions/emergencies")
 local Objectives = require("guidedmissions/objectives")
 local Netvars = require("guidedmissions/netvars")
 local Settings = require("guidedmissions/settings")
+local Strings = require("guidedmissions/strings")
+local L10n = require("guidedmissions/l10n")
 
 local HOLD_SECONDS = 3
 
@@ -27,8 +29,11 @@ local function HasSurviveObjective(mission)
     return false
 end
 
--- Rows are `label|prefab|counter|done|optional` joined by `;`, so the
--- separators must never appear inside the free-form label.
+-- Rows are `label|prefab|counter|done|optional`, joined by `;`, so the
+-- separators must never appear inside the free-form label. A survive row appends
+-- `|day|current|target` (fields 6-8) so the client can render the day counter in
+-- its own language; every other row stays five fields. The label and counter are
+-- SOURCE text: the client translates the label at render time.
 local function SanitiseLabel(text)
     return (tostring(text):gsub("[|;]", " "))
 end
@@ -48,13 +53,21 @@ local function FormatRows(mission, progress, force_done)
                 local value = progress[i] or 0
                 local done = ((force_done and not optional)
                     or Objectives.IsComplete(objective, value)) and 1 or 0
-                rows[#rows + 1] = table.concat({
+                local fields = {
                     SanitiseLabel(Objectives.GetLabel(objective)),
                     Objectives.GetIconPrefab(objective) or "",
                     Objectives.GetCounter(objective, value),
                     tostring(done),
                     optional and "1" or "0",
-                }, "|")
+                }
+                local kind, current, target =
+                    Objectives.GetCounterMeta(objective, value)
+                if kind ~= "" then
+                    fields[#fields + 1] = kind
+                    fields[#fields + 1] = tostring(current)
+                    fields[#fields + 1] = tostring(target)
+                end
+                rows[#rows + 1] = table.concat(fields, "|")
             end
         end
     end
@@ -316,7 +329,8 @@ function GuidedMissionManager:SetMission(index)
         self.progress = {}
         self.completed = true
         self:Sync()
-        self:Announce("All guided missions are complete!")
+        -- Chat is composed by the server, so it uses the server's locale.
+        self:Announce(L10n.L(Strings.ALL_COMPLETE_CHAT))
         return
     end
 
@@ -332,11 +346,11 @@ function GuidedMissionManager:SetMission(index)
     self:Sync()
     -- Server log only: the HUD already shows the mission, and announcing every
     -- start would spam chat (especially with /setmission).
-    self:Log(string.format(
-        "%s - Mission %d: %s",
+    self:Log(L10n.Lfmt(
+        Strings.MISSION_START_FMT,
         self.inst:GetDisplayName(),
         index,
-        mission.title
+        L10n.L(mission.title)
     ))
 
     -- A freshly activated mission can already be satisfied (for example, a
@@ -538,10 +552,10 @@ function GuidedMissionManager:ActivateEmergency(entry)
     end
 
     self:Sync()
-    self:Log(string.format(
-        "%s - Emergency: %s",
+    self:Log(L10n.Lfmt(
+        Strings.EMERGENCY_START_FMT,
         self.inst:GetDisplayName(),
-        entry.title
+        L10n.L(entry.title)
     ))
     return true
 end
@@ -566,10 +580,10 @@ function GuidedMissionManager:ResolveEmergency()
     self.current_mission = nil
     self.progress = {}
 
-    self:Log(string.format(
-        "%s - Emergency resolved: %s",
+    self:Log(L10n.Lfmt(
+        Strings.EMERGENCY_RESOLVED_FMT,
         self.inst:GetDisplayName(),
-        entry.title
+        L10n.L(entry.title)
     ))
 
     if self.emergency_hold_task ~= nil then
@@ -668,10 +682,10 @@ function GuidedMissionManager:CompleteCurrentMission()
     self.current_mission = nil
     self.progress = {}
 
-    self:Announce(string.format(
-        "%s completed: %s",
+    self:Announce(L10n.Lfmt(
+        Strings.MISSION_COMPLETE_FMT,
         self.inst:GetDisplayName(),
-        mission.title
+        L10n.L(mission.title)
     ))
 
     if self.hold_task ~= nil then
@@ -689,9 +703,11 @@ end
 
 function GuidedMissionManager:Sync()
     if self.completed then
+        -- Source text, not L(): netvars carry the authored strings and every
+        -- client translates them with its own locale.
         Netvars.Write(self.inst, {
-            title = "All Missions Complete",
-            subtext = "You survived. For now.",
+            title = Strings.ALL_COMPLETE_TITLE,
+            subtext = Strings.ALL_COMPLETE_SUBTEXT,
             hint = "",
             rows = "",
             state = "done",

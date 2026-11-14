@@ -48,6 +48,30 @@ starts.
 Missions run in file order. Each player advances independently after a 3-second
 "won" hold. The last mission is followed by a terminal "All Missions Complete" card.
 
+### Text and translation
+
+`title`, `subtext`, `hint`, and every objective `label` are **translation keys**: the
+server sends the English source and each client renders it in its own language. Author
+them in English, keep them single-line, and never use `|`, `;`, quotes, or newlines
+(the row wire format and the locale-file scan depend on it).
+
+Translations must fit the card's fixed layout. The l10n harness enforces these
+per-field budgets in weighted columns (CJK glyphs count 3): **title 27, subtext 52,
+label 28, hint 80**. Reword a translation that does not fit rather than growing the
+card. See [`localization.md`](localization.md) for the workflow.
+
+Editing an English string changes its key and orphans the existing translations. After
+any text edit, regenerate the manifest and translate the new keys in every shipped
+locale:
+
+```bash
+lua tools/gen_l10n.lua
+lua tests/l10n_test.lua
+```
+
+The runtime always falls back to English when a key or locale is missing, so a
+half-updated translation degrades gracefully instead of crashing.
+
 ## Emergency missions
 
 Pop-up emergencies are a separate, unordered collection in
@@ -662,5 +686,8 @@ engine behavior behind each row.
 4. **Docs** — update this file (fields, defaults, icon, event mapping) and the table
    in `README.md`. If you verified new engine behavior, record it in
    `docs/dst-api.md`.
-5. Run `./verify`, then confirm in game with a human test — rendering and netvar
+5. **Text** — if the change adds or edits labels, regenerate `languages/en.lua` and
+   update every shipped locale (`es`, `pt`, `de`, `zh`); see
+   [`localization.md`](localization.md).
+6. Run `./verify`, then confirm in game with a human test — rendering and netvar
    replication are not covered offline.

@@ -51,6 +51,7 @@ processes, takes minutes, and is the slowest way to answer anything.
 | Tweening / sliding a widget | `scripts/widgets/widget.lua` (`MoveTo`), `scripts/components/uianim.lua` |
 | Client-side saved preferences | `scripts/mainfunctions.lua` (`SetPersistentString`), `scripts/craftingmenuprofile.lua` |
 | Performance / profiling | `scripts/profiler.lua`, `perfutil.lua`, `consolecommands.lua` |
+| Translation / locale codes | `scripts/languages/loc.lua`, `scripts/translator.lua`, `scripts/main.lua` (boot order), `scripts/modutil.lua` (`LoadPOFile`) |
 
 If a signature is in doubt, check here rather than guessing — DST's API is loosely
 documented and version-dependent.
@@ -1185,6 +1186,86 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
   profiler (`TheSim:ToggleFrameProfiler`, `debugkeys.lua:1242-1245`). The `TheSim:*`
   methods are engine-bound; calling them from the console may work, but these scripts
   do not guarantee it.
+
+## Translation and locale
+
+Verified 2026-11-13 against build 762172. This is about DST's *text* localization; the
+`## Language` section below is about the Lua runtime and is unrelated.
+
+- **`LOC` is a global** created at `scripts/main.lua:195`, before mods load.
+  `LOC.GetLocaleCode()` (`scripts/languages/loc.lua:82-89`) returns a lowercase code:
+  `en, fr, es, mex, tr, de, it, pt, pl, ru, ko, zh, zht, zhr` (`loc.lua:5-17`; the
+  numeric `LANGUAGE` enum is `constants.lua:2605-2631`). Brazilian Portuguese is
+  **`pt`**, Simplified Chinese **`zh`**, Traditional **`zht`**, WeGame Simplified
+  **`zhr`**, Latin American Spanish **`mex`**.
+- **Japanese is not an active locale.** `LANGUAGE.JAPANESE` exists
+  (`constants.lua:2627`) and Steam's `japanese` maps to it
+  (`LANGUAGE_STEAMCODE_TO_ID`, `constants.lua:2647`), but the localization entry is
+  **commented out** in `loc.lua` (the `{id = LANGUAGE.JAPANESE, ..., code = "ja"}` line
+  after `zhr`). `GetLocaleCode` therefore never returns `ja`; a shipped `ja` table is
+  dormant until Klei enables it.
+- **Call it with a dot, not a colon.** `GetLocaleCode(lang_id)` has no `self`; vanilla
+  calls `LOC.GetLocaleCode()` (`screens/redux/servercreationscreen.lua:350`,
+  `modindex.lua:602`). `LOC:GetLocaleCode()` passes the table as `lang_id`, matches no
+  locale entry, and silently returns `"en"`.
+- **On Steam the in-game language menu only offers English, Simplified Chinese,
+  and Traditional Chinese.** `LOC.GetLanguages()` (`loc.lua:44-73`) always adds
+  `LANGUAGE.ENGLISH`, then adds a locale only when `IsSteam()` and
+  `in_steam_menu = true` (`loc.lua:15-16`; `in_console_menu` is the console list).
+  The Options screen builds its language buttons from that list
+  (`screens/redux/optionsscreen.lua:1341-1344`). Below it, under the
+  `STRINGS.UI.OPTIONS.MOD_LANGUAGES_TITLE` heading — literally **"Steam Workshop
+  Collections"** (`strings.lua:11015`) — the screen fetches
+  `https://dst-translation-mods.klei.com/mods.json` and each button opens the
+  Workshop page (`optionsscreen.lua:1345-1375`; `_BuildModLangButton`). Picking a
+  pack does not change the game's language setting.
+- **Steam Workshop language packs are client-only mods that call
+  `LoadPOFile(path, code)`.** That stores the PO under `code` and sets
+  `LanguageTranslator.defaultlang = code` (`translator.lua:136`); the
+  post-mod `TranslateStringTable(STRINGS)` pass (`main.lua:399-402`) applies it.
+  It does **not** call `LOC.SetCurrentLocale` or `Profile:SetLanguageID`, so for a
+  French/German/etc. pack user `LOC.GetLocaleCode()` still returns `"en"`.
+  `LanguageTranslator.defaultlang` is the reliable signal for the effective UI
+  language, and it is what `L10n.GetLocale` checks before `LOC`.
+- **Pack codes are arbitrary.** They are whatever the pack passes to
+  `LoadPOFile`, not necessarily DST's own codes (the community Brazilian pack
+  uses `"br"`, not `"pt"`). Normalise variants and ignore codes the mod does not
+  ship.
+- **There is no `AddModTranslationString`** in this build, and no automatic mod PO
+  loader. Don't search for one; the single-player Don't Starve API differs.
+- **`LoadPOFile` exists but is unsafe for mods.** `scripts/modutil.lua:836-840` injects
+  `env.LoadPOFile(path, lang)`, which calls `LanguageTranslator:LoadPOFile`. That call
+  **replaces** `self.languages[lang]` and sets `self.defaultlang`
+  (`scripts/translator.lua:67-138`), so it disturbs other mods and the final
+  `TranslateStringTable(STRINGS)` pass at `main.lua:402`. This mod uses its own tables
+  in `scripts/guidedmissions/l10n.lua`; see `docs/localization.md`.
+- **Locale is per Lua VM.** The dedicated server picks the cluster language
+  (`TheNet:GetDefaultServerLanguage()`), a client picks its own
+  (`Profile:GetLanguageID()`) — `scripts/languages/language.lua:7-25`. On Steam the
+  profile value can only be `en`, `zh`, or `zht` (the menu above); other client
+  languages exist only as language-pack mods. Each VM translates its own
+  `STRINGS`; nothing propagates translations over the network.
+- **Netvars carry raw bytes.** Server-resolved text reaches every client in the
+  **server's** language (examine text and `TheNet:Announce` are the obvious examples).
+  To localize per client, send the source text/key and resolve it on the receiving
+  client — which is what this mod does.
+- **Localized prefab names:** `STRINGS.NAMES[prefab:upper()]` on the client, as vanilla
+  crafting UI does (`widgets/redux/craftingmenu_details.lua:253`) and as
+  `named_replica.lua:1-4` fall back to. This mod instead embeds display names inside
+  translated `label`/`hint` sentences.
+- **Font widths for layout budgets:** the mod's primary BMFonts are Latin-only and
+  condensed. DST falls back to Noto outline fonts (`scripts/fonts.lua:50-62`): CJK
+  glyph advances are ~2.8–2.9× an average Latin glyph at the same size, and
+  Cyrillic/Greek are ~1.8–2.1×. That is why `l10n.DisplayWidth` weights Cyrillic as 2
+  and CJK as 3.
+- **Fallback font atlases are BMFont packed mode.** `fonts/fallback_outline.zip` is
+  DXT5; `fonts/fallback_full_outline_packed.zip` is uncompressed RGBA and declares
+  `common packed="1"` with a per-char `chnl` (1=blue, 2=green, 4=red, 8=alpha). The
+  glyph lives in that channel, not in RGB. `tests/preview/render.py` decodes this so
+  Russian and Chinese previews render.
+- **`modinfo.lua` has its own translation hook:** the mod-info environment supplies
+  `locale` and `ChooseTranslationTable(tbl)` (`scripts/modindex.lua:598-606`). The mod
+  does not use it yet, so configuration labels remain English.
 
 ## Language
 

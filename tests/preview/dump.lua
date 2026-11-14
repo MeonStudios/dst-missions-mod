@@ -482,6 +482,9 @@ local owner = {
 }
 
 local MissionTracker = require("widgets/guidedmissiontracker")
+-- Scenario locale. The real module resolves `en` when LOC is absent; German
+-- scenarios set a real shipped locale so the actual translations are rendered.
+local L10n = require("guidedmissions/l10n")
 
 -- ---- dump ----------------------------------------------------------------
 
@@ -543,8 +546,10 @@ local function serialize(node)
     return "{" .. table.concat(parts, ",") .. "}"
 end
 
-local function build_scenario(name, state, collapse, show_hover)
+local function build_scenario(name, state, collapse, show_hover, locale)
     current_state = state
+    -- Payloads stay in the authored source language; the tracker translates.
+    L10n.SetLocale(locale)
     local tracker = MissionTracker(owner)
     -- In game this widget is docked to the top-right HUD root, so its x is
     -- negative; shift it into the preview canvas.
@@ -570,12 +575,20 @@ local function build_scenario(name, state, collapse, show_hover)
     return "{\"name\":" .. escape(name) .. ",\"tree\":" .. serialize(tracker) .. "}"
 end
 
-local ROW = function(label, prefab, counter, done, optional)
-    return table.concat({
+local function ROW(label, prefab, counter, done, optional, kind, current, target)
+    local fields = {
         label, prefab or "", counter,
         done and "1" or "0",
         optional and "1" or "0",
-    }, "|")
+    }
+    -- Survive rows append fields 6-8 so the client can format the day counter
+    -- itself; see manager.lua FormatRows.
+    if kind ~= nil then
+        fields[#fields + 1] = kind
+        fields[#fields + 1] = tostring(current)
+        fields[#fields + 1] = tostring(target)
+    end
+    return table.concat(fields, "|")
 end
 
 -- Same payloads, rendered once per border style so the two frames can be
@@ -708,11 +721,140 @@ local CASES = {
         },
         true,
     },
+    -- German, using the shipped translation table. Payloads are the English
+    -- source strings the server would send; the tracker translates them.
+    {
+        "de_active_2row",
+        {
+            title = "Basic Supplies",
+            subtext = "All great stories start somewhere.",
+            rows = table.concat({
+                ROW("Collect flint", "flint", "1/3"),
+                ROW("Collect twigs", "twigs", "0/2"),
+            }, ";"),
+            state = "active",
+        },
+        false,
+        false,
+        "de",
+    },
+    {
+        "de_hint_open",
+        {
+            title = "An Apple a Day...",
+            subtext = "Things will hurt you. Learn how to fix that.",
+            hint = "Kill butterflies by standing on them and use the force attack keybind (Ctrl + F)",
+            rows = table.concat({
+                ROW("Eat a butterfly wing", "butterflywings", "0/1"),
+                ROW("Restore at least 10 health", "heart", "0/10"),
+            }, ";"),
+            state = "active",
+        },
+        false,
+        true,
+        "de",
+    },
+    {
+        "de_optional_3row",
+        {
+            title = "Where's the Beef?",
+            subtext = "Something out there must be edible.",
+            rows = table.concat({
+                ROW("Collect meat", "", "1/2"),
+                ROW("Catch something in a trap", "trap", "0/1", false, true),
+            }, ";"),
+            state = "active",
+        },
+        false,
+        false,
+        "de",
+    },
+    {
+        "de_day_1row",
+        {
+            title = "Let There Be Light",
+            subtext = "The dark is not your friend. Probably.",
+            rows = ROW("Survive the first night", "", "Day 1/3", false, false, "day", "1", "3"),
+            state = "active",
+        },
+        false,
+        false,
+        "de",
+    },
+    {
+        "de_done",
+        {
+            title = "All Missions Complete",
+            subtext = "You survived. For now.",
+            rows = "",
+            state = "done",
+        },
+        false,
+        false,
+        "de",
+    },
+    -- Russian, to check Cyrillic glyphs and the longer phrasing.
+    {
+        "ru_active_2row",
+        {
+            title = "Basic Supplies",
+            subtext = "All great stories start somewhere.",
+            rows = table.concat({
+                ROW("Collect flint", "flint", "1/3"),
+                ROW("Collect twigs", "twigs", "0/2"),
+            }, ";"),
+            state = "active",
+        },
+        false,
+        false,
+        "ru",
+    },
+    {
+        "ru_day_1row",
+        {
+            title = "Let There Be Light",
+            subtext = "The dark is not your friend. Probably.",
+            rows = ROW("Survive the first night", "", "Day 1/3", false, false, "day", "1", "3"),
+            state = "active",
+        },
+        false,
+        false,
+        "ru",
+    },
+    -- Simplified Chinese, rendered through the full CJK fallback font.
+    {
+        "zh_active_2row",
+        {
+            title = "Basic Supplies",
+            subtext = "All great stories start somewhere.",
+            rows = table.concat({
+                ROW("Collect flint", "flint", "1/3"),
+                ROW("Collect twigs", "twigs", "0/2"),
+            }, ";"),
+            state = "active",
+        },
+        false,
+        false,
+        "zh",
+    },
+    {
+        "zh_day_1row",
+        {
+            title = "Let There Be Light",
+            subtext = "The dark is not your friend. Probably.",
+            rows = ROW("Survive the first night", "", "Day 1/3", false, false, "day", "1", "3"),
+            state = "active",
+        },
+        false,
+        false,
+        "zh",
+    },
 }
 
 local scenarios = {}
 for _, case in ipairs(CASES) do
-    scenarios[#scenarios + 1] = build_scenario(case[1], case[2], case[3], case[4])
+    scenarios[#scenarios + 1] =
+        build_scenario(case[1], case[2], case[3], case[4], case[5])
 end
 
 local out = "{\"scenarios\":[" .. table.concat(scenarios, ",") .. "]}"

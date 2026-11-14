@@ -1,0 +1,3 @@
+# Lua files must stay LF in the working tree: tests/l10n_test.lua rejects CRLF
+# in the locale tables, and this repo's Windows clone has core.autocrlf=true.
+*.lua text eol=lf

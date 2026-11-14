@@ -205,6 +205,8 @@ local Netvars = require("guidedmissions/netvars")
 local Objectives = require("guidedmissions/objectives")
 local RealMissions = require("guidedmissions/missions")
 local RealEmergencies = require("guidedmissions/emergencies")
+local Strings = require("guidedmissions/strings")
+local L10n = require("guidedmissions/l10n")
 -- The manager and this harness share the same settings table instance.
 local Settings = require("guidedmissions/settings")
 
@@ -1173,6 +1175,10 @@ type_fixtures.survive = function()
     Check("survive label is rendered", Row(player, 1)[1] == "Survive to day 3")
     Check("survive row is text-only", Row(player, 1)[2] == "")
     Check("survive counter starts at day 1", Row(player, 1)[3] == "Day 1/3")
+    -- Fields 6-8 let each client format the day counter in its own language.
+    Check("survive counter kind", Row(player, 1)[6] == "day")
+    Check("survive counter current", Row(player, 1)[7] == "1")
+    Check("survive counter target", Row(player, 1)[8] == "3")
 
     TheWorld.state.cycles = 1
     Advance(1)
@@ -1807,6 +1813,44 @@ for i, entry in ipairs(RealEmergencies.entries) do
     end
     Check(label .. " every row has a label, counter and done flag", well_formed)
 end
+
+-- ---- translated server smoke ---------------------------------------------
+--
+-- Netvars always carry source text (each client translates its own copy); the
+-- server translates only its own chat/log lines. Force a pseudo locale and
+-- check both sides, including that a title is translated exactly once.
+
+local pseudo = {}
+for key in pairs(require("guidedmissions/languages/en")) do
+    pseudo[key] = "XX " .. key
+end
+pseudo[Strings.MISSION_COMPLETE_FMT] = "XX %s completed: %s"
+pseudo["Harness Twist"] = "XX Harness Twist"
+L10n.RegisterLocale("xx", pseudo, 10)
+L10n.SetLocale("xx")
+
+local tr_manager, tr_player = Spawn()
+Activate(tr_manager, tr_player, {
+    id = "fixture_translated",
+    title = "Harness Twist",
+    subtext = "Twisted source.",
+    objectives = {
+        { type = "collect", prefab = "flint", count = 1, label = "Collect flint" },
+    },
+})
+Check("translated smoke: title netvar stays source",
+    Read(tr_player)["guidedmissions.title"] == "Harness Twist")
+Check("translated smoke: subtext netvar stays source",
+    Read(tr_player)["guidedmissions.subtext"] == "Twisted source.")
+Check("translated smoke: row label stays source",
+    Row(tr_player, 1)[1] == "Collect flint")
+
+Carry(tr_player, "flint", 1)
+InventoryChanged(tr_player)
+Check("translated smoke: completion announcement uses server locale",
+    announcements[#announcements] == "XX Wilson completed: XX Harness Twist")
+
+L10n.SetLocale(nil)
 
 print(failures == 0 and "ALL PASS" or ("FAILURES: " .. failures))
 os.exit(failures == 0 and 0 or 1)
