@@ -80,6 +80,9 @@ local ITEM_ATLAS = {
     -- texture file (`inventoryimages.tex`) that is not in images.zip, so the
     -- preview can only resolve it from inventoryimages3.xml.
     trap = "images/inventoryimages3.xml",
+    umbrella = "images/inventoryimages3.xml",
+    strawhat = "images/inventoryimages3.xml",
+    butterflywings = "images/inventoryimages1.xml",
 }
 
 function GetInventoryItemAtlas(tex)
@@ -644,6 +647,38 @@ local CASES = {
                 ROW("Collect flint", "flint", "1/3"),
                 ROW("Collect twigs", "twigs", "0/2"),
                 ROW("Pick a flower", "flower", "0/1", false, true),
+            }, ";"),
+            state = "active",
+        },
+    },
+    {
+        -- The real wetness card: one wide live counter above three short
+        -- optional rows. The icon column must stay put and every icon must sit
+        -- the same distance from its 0/1 (the fixed counter column).
+        "wet_4row",
+        {
+            title = "Drenched",
+            subtext = "Soaked! Dry off before you freeze or go crazy.",
+            rows = table.concat({
+                ROW("Dry off to 10%", "", "80/10%"),
+                ROW("Equip an Umbrella", "umbrella", "0/1", false, true),
+                ROW("Equip a Straw Hat", "strawhat", "0/1", false, true),
+                ROW("Stand under a tree", "", "0/1", false, true),
+            }, ";"),
+            state = "active",
+        },
+    },
+    {
+        -- A `tip` row: optional by default, a normal 0/1 counter, no icon. It
+        -- must not blank the counter: an empty counter breaks the HUD's row
+        -- layout (labels stop rendering).
+        "tip_2row",
+        {
+            title = "Under the Boughs",
+            subtext = "Trees keep the rain off.",
+            rows = table.concat({
+                ROW("Collect flint", "flint", "1/3"),
+                ROW("Stand under a tree", "", "0/1", false, true),
             }, ";"),
             state = "active",
         },

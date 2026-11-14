@@ -19,7 +19,8 @@
 --   sleep:        count, prefab?             -> enter a tent/bedroll `count` times
 --   heal:         count                      -> restore `count` health points
 --   sanity:       count                      -> restore `count` sanity points
---   reach_stat:   stat, threshold            -> stat meets a live percentage (">=75")
+--   reach_stat:   stat, threshold            -> live stat threshold (temperature uses degrees)
+--   equip:        prefab?, category?, slot?  -> matching item is currently worn (live)
 --   pick:         prefab, count              -> pick `count` plants
 --   collect_food: count, foodtype?,          -> hold `count` edible items
 --                 secondaryfoodtype?
@@ -238,7 +239,7 @@ return {
         hint = "Heat a Thermal Stone by a fire to keep you warm during winter.",
         objectives = {
             { type = "craft", prefab = "heatrock", count = 1, label = "Craft a Thermal Stone" },
-            { type = "collect", prefab = "smallmeat_dried", count = 2, label = "Dry meat into jerky"},
+            { type = "collect", prefab = "smallmeat_dried", count = 2, label = "Dry meat into jerky", optional = true},
         },
     },
     {

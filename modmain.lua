@@ -8,11 +8,15 @@ local GLOBAL = GLOBAL
 local MissionNetvars = require("guidedmissions/netvars")
 local Settings = require("guidedmissions/settings")
 
--- The tracker draws the world flower's animation for pick rows (flowers are
--- world plants with no inventory icon), so the client needs the vanilla anim
--- loaded. HUD widgets do not inherit a prefab's asset list.
+-- The tracker draws world animations for rows whose subject has no inventory
+-- art: the flower for pick rows, and the normal tree for `tip` rows that point
+-- at `evergreen_normal` (a tree's bank and build live in separate files). The
+-- client needs these vanilla anims loaded; HUD widgets do not inherit a
+-- prefab's asset list.
 Assets = {
     Asset("ANIM", "anim/flowers.zip"),
+    Asset("ANIM", "anim/evergreen_new.zip"),          -- build
+    Asset("ANIM", "anim/evergreen_short_normal.zip"), -- bank + animations
 }
 
 Settings.show_tracker = GetModConfigData("SHOW_TRACKER") ~= false

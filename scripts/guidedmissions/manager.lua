@@ -95,8 +95,9 @@ local GuidedMissionManager = Class(function(self, inst)
 
     -- Emergency overlay. While `emergency` is set it is the visible mission and
     -- the chain mission waits in `suspended_mission`/`suspended_progress`.
-    -- `fired_emergencies` remembers triggered ids; whether it survives a load
-    -- depends on Settings.emergency_frequency (see OnSave/OnLoad).
+    -- `fired_emergencies` remembers ids whose recovered card has been shown;
+    -- whether that survives a load depends on Settings.emergency_frequency
+    -- (see OnSave/OnLoad).
     self.emergency = nil
     self.suspended_mission = nil
     self.suspended_progress = nil
@@ -154,6 +155,46 @@ local GuidedMissionManager = Class(function(self, inst)
     inst:ListenForEvent("sanitydelta", function(_, data)
         self:OnObjectiveEvent("sanitydelta", data)
         self:CheckEmergencies()
+    end)
+    -- Hunger decays on a 1 Hz task and pushes `hungerdelta` every time
+    -- (`components/hunger.lua`, SetCurrent), so this also keeps a live
+    -- `reach_stat` hunger row current between polls.
+    inst:ListenForEvent("hungerdelta", function(_, data)
+        self:OnObjectiveEvent("hungerdelta", data)
+        self:CheckEmergencies()
+    end)
+    -- Wetness (moisture) and temperature call SetTemperature/DoDelta every
+    -- frame, so their `*delta` events are far too frequent to forward. The 1 Hz
+    -- poll reads both; these cheap threshold-crossing events just let the stock
+    -- freezing/overheating emergencies pop the moment they cross.
+    inst:ListenForEvent("startfreezing", function(_, _)
+        self:CheckEmergencies()
+    end)
+    inst:ListenForEvent("stopfreezing", function(_, _)
+        self:CheckEmergencies()
+    end)
+    inst:ListenForEvent("startoverheating", function(_, _)
+        self:CheckEmergencies()
+    end)
+    inst:ListenForEvent("stopoverheating", function(_, _)
+        self:CheckEmergencies()
+    end)
+    -- Hound waves push `houndwarning` on each targeted player as the warning
+    -- starts (scripts/components/hounded.lua, DoWarningSound) -- the first
+    -- bark. The hound condition reads world state and the 1 Hz poll would catch
+    -- it anyway; this just pops the card immediately.
+    inst:ListenForEvent("houndwarning", function(_, _)
+        self:CheckEmergencies()
+    end)
+    -- `equip`/`unequip` drive live `equip` objectives: the row mirrors the
+    -- current equipment slots, so it checks while the item is worn and unchecks
+    -- when it is removed. Vanilla pushes both on the inventory's owner
+    -- (scripts/components/inventory.lua) after updating `equipslots`.
+    inst:ListenForEvent("equip", function(_, data)
+        self:OnObjectiveEvent("equip", data)
+    end)
+    inst:ListenForEvent("unequip", function(_, data)
+        self:OnObjectiveEvent("unequip", data)
     end)
     inst:ListenForEvent("guidedmissions_cookedfood", function(_, data)
         self:OnObjectiveEvent("guidedmissions_cookedfood", data)
@@ -489,12 +530,16 @@ end
 -- ---------------------------------------------------------------- emergencies
 
 -- "always" ignores the fired set entirely; the resolve condition is the only
--- guard. "session" and "server" remember triggered ids (the latter in the save).
+-- guard. "session" and "server" remember resolved ids (the latter in the save).
 function GuidedMissionManager:EmergencyAlreadyFired(id)
     return Settings.emergency_frequency ~= "always"
         and self.fired_emergencies[id] == true
 end
 
+-- Called from ResolveEmergency, not from ActivateEmergency: an entry counts as
+-- seen only once its recovered ("won") card has been shown. A card that is
+-- interrupted before it resolves -- an admin jump, a save/load, the player
+-- leaving -- leaves no trace, so the emergency can fire again later.
 function GuidedMissionManager:MarkEmergencyFired(id)
     if Settings.emergency_frequency ~= "always" then
         self.fired_emergencies[id] = true
@@ -543,8 +588,9 @@ function GuidedMissionManager:ActivateEmergency(entry)
     self.suspended_mission = self.current_mission
     self.suspended_progress = self.progress
 
+    -- Not marked as fired here: only a resolved card counts as seen (see
+    -- ResolveEmergency).
     self.emergency = entry
-    self:MarkEmergencyFired(entry.id)
     self.current_mission = entry
     self.progress = {}
     self.last_poll_day = nil
@@ -569,6 +615,10 @@ function GuidedMissionManager:ResolveEmergency()
     if entry == nil then
         return
     end
+
+    -- This is the moment the entry counts as seen: the recovered card is being
+    -- shown, so the repeat guard may suppress it from now on.
+    self:MarkEmergencyFired(entry.id)
 
     Netvars.Write(self.inst, {
         title = entry.title,

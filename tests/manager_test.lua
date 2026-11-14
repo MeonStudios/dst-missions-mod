@@ -195,6 +195,10 @@ local function NewInst(guid)
                 fn(item)
             end
         end,
+        -- Currently equipped items, keyed by EQUIPSLOTS ("hands", "head",
+        -- "body", "beard"). `equip` objectives read this live, exactly as
+        -- `Inventory.equipslots` holds them in the game.
+        equipslots = {},
     }
     function inst:ListenForEvent(event, fn)
         self._listeners[event] = self._listeners[event] or {}
@@ -341,7 +345,7 @@ local needs_prefab = {
 -- one.
 local optional_prefab = {
     cook = true, cookpot = true, prototype = true, plant = true, trap_catch = true,
-    sleep = true, fertilize = true,
+    sleep = true, fertilize = true, equip = true,
 }
 
 -- Shared by chain and emergency validation. Returns `optional == true` so the
@@ -374,20 +378,39 @@ local function ValidateObjectiveFields(where, objective, index)
         Check(row .. " icon is a prefab id", IsPrefabId(objective.icon))
     end
 
-    if objective.type == "survive" then
+    if objective.type == "tip" then
+        -- A tip is an informational row: no target, no progress, and always
+        -- optional. Authoring `optional = false` does nothing at runtime, so
+        -- reject the misleading flag.
+        Check(row .. " does not set a count", objective.count == nil)
+        Check(row .. " does not set optional = false", objective.optional ~= false)
+    elseif objective.type == "survive" then
         Check(row .. " has a day", tonumber(objective.day) ~= nil)
     elseif objective.type == "reach_stat" then
         -- A live stat row has no count: it tracks a percentage against a
         -- threshold string on the same 0-100 scale as emergency conditions.
         Check(row .. " names a known stat",
             RealEmergencies.VALID_STATS[objective.stat] == true)
-        local operator = RealEmergencies.ParseThreshold(objective.threshold)
+        local operator = RealEmergencies.ParseStatThreshold(
+            objective.stat, objective.threshold)
         Check(row .. " threshold parses", operator ~= nil)
+    elseif objective.type == "equip" then
+        -- A live equipment row has no count: it is 0/1 for "currently
+        -- equipped". Filters are optional and combine with AND.
+        Check(row .. " does not set a count", objective.count == nil)
+        Check(row .. " category is known",
+            objective.category == nil
+                or Objectives.EQUIP_CATEGORIES[objective.category] == true)
+        Check(row .. " slot is known",
+            objective.slot == nil
+                or Objectives.EQUIP_SLOTS[objective.slot] == true)
     else
         Check(row .. " has a count", tonumber(objective.count) ~= nil)
     end
 
-    return objective.optional == true
+    -- A tip is always optional at runtime (Objectives.IsOptional), so it must
+    -- not count as a row that gates completion here either.
+    return objective.optional == true or objective.type == "tip"
 end
 
 local seen_ids = {}
@@ -442,57 +465,92 @@ for i, entry in ipairs(RealEmergencies.entries) do
     Check(where .. " hint is text when set",
         entry.hint == nil or (type(entry.hint) == "string" and #entry.hint > 0))
 
-    local function ValidateCondition(name, condition, want_low)
+    local function ValidateCondition(name, condition)
         Check(where .. " " .. name .. " is a table", type(condition) == "table")
         if type(condition) ~= "table" then
-            return nil
+            return nil, nil
         end
         Check(where .. " " .. name .. " kind is known",
             RealEmergencies.VALID_KINDS[condition.kind] == true)
+
+        if condition.kind == "hounds" then
+            Check(where .. " " .. name .. " hound state is known",
+                RealEmergencies.VALID_HOUND_STATES[condition.state] == true)
+            -- "clear" as a trigger would fire when nothing is happening.
+            if name == "trigger" then
+                Check(where .. " trigger hound state is not clear",
+                    condition.state ~= "clear")
+            end
+            return nil, nil
+        end
+
         Check(where .. " " .. name .. " stat is known",
             RealEmergencies.VALID_STATS[condition.stat] == true)
 
-        local operator, value = RealEmergencies.ParseThreshold(condition.threshold)
+        local operator, value = RealEmergencies.ParseStatThreshold(
+            condition.stat, condition.threshold)
         Check(where .. " " .. name .. " threshold parses", operator ~= nil)
-        if operator ~= nil then
-            local is_low = operator == "<" or operator == "<="
-            Check(where .. " " .. name .. " uses a "
-                .. (want_low and "low" or "high") .. " comparison", is_low == want_low)
-        end
-        return value
+        return operator, value
     end
 
-    local trigger_value = ValidateCondition("trigger", entry.trigger, true)
-    local resolve_value = ValidateCondition("resolve", entry.resolve, false)
-    Check(where .. " trigger and resolve use the same stat",
-        type(entry.trigger) == "table" and type(entry.resolve) == "table"
-            and entry.trigger.stat == entry.resolve.stat)
-    if trigger_value ~= nil and resolve_value ~= nil then
-        Check(where .. " resolve is at or above the trigger",
-            resolve_value >= trigger_value)
+    local trigger_operator, trigger_value =
+        ValidateCondition("trigger", entry.trigger)
+    local resolve_operator, resolve_value =
+        ValidateCondition("resolve", entry.resolve)
+    local stat_emergency = type(entry.trigger) == "table"
+        and entry.trigger.kind == "stat"
+    if stat_emergency then
+        Check(where .. " trigger and resolve use the same stat",
+            type(entry.resolve) == "table"
+                and entry.trigger.stat == entry.resolve.stat)
+        if trigger_operator ~= nil and resolve_operator ~= nil then
+            local trigger_low =
+                trigger_operator == "<" or trigger_operator == "<="
+            local resolve_low =
+                resolve_operator == "<" or resolve_operator == "<="
+            -- Hysteresis needs opposite directions. Low-to-high is the shape for
+            -- health/sanity/hunger/freezing; high-to-low for overheating and
+            -- wetness, where a high value is the danger.
+            Check(where .. " trigger and resolve use opposite comparisons",
+                trigger_low ~= resolve_low)
+            if trigger_low then
+                Check(where .. " resolve is at or above the trigger",
+                    resolve_value >= trigger_value)
+            else
+                Check(where .. " resolve is at or below the trigger",
+                    resolve_value <= trigger_value)
+            end
+        end
     end
 
     Check(where .. " has an objective list",
         type(entry.objectives) == "table" and #entry.objectives > 0)
 
-    -- Exactly one required row: the recovery goal. It must match `resolve`, so
-    -- the card cannot promise a threshold different from the one that ends the
-    -- emergency. Every other row is optional guidance.
+    -- Stat emergencies have exactly one required row: the recovery goal. It
+    -- must match `resolve`, so the card cannot promise a threshold different
+    -- from the one that ends the emergency. Hound emergencies resolve on world
+    -- state, so they have no required row; every row is optional guidance.
     local required_count = 0
     for j, objective in ipairs(entry.objectives or {}) do
         if not ValidateObjectiveFields(where, objective, j) then
             required_count = required_count + 1
-            Check(where .. " goal row is reach_stat",
-                objective.type == "reach_stat")
-            Check(where .. " goal stat matches resolve",
-                type(entry.resolve) == "table"
-                    and objective.stat == entry.resolve.stat)
-            Check(where .. " goal threshold matches resolve",
-                type(entry.resolve) == "table"
-                    and objective.threshold == entry.resolve.threshold)
+            if stat_emergency then
+                Check(where .. " goal row is reach_stat",
+                    objective.type == "reach_stat")
+                Check(where .. " goal stat matches resolve",
+                    type(entry.resolve) == "table"
+                        and objective.stat == entry.resolve.stat)
+                Check(where .. " goal threshold matches resolve",
+                    type(entry.resolve) == "table"
+                        and objective.threshold == entry.resolve.threshold)
+            end
         end
     end
-    Check(where .. " has exactly one required goal row", required_count == 1)
+    if stat_emergency then
+        Check(where .. " has exactly one required goal row", required_count == 1)
+    else
+        Check(where .. " has only optional rows", required_count == 0)
+    end
 end
 
 -- Bad mission data also breaks the real-mission render smoke below, so report
@@ -568,7 +626,9 @@ package.loaded["guidedmissions/emergencies"] = {
     VALID_STATS = RealEmergencies.VALID_STATS,
     VALID_KINDS = RealEmergencies.VALID_KINDS,
     GetStatFraction = RealEmergencies.GetStatFraction,
+    GetStatValue = RealEmergencies.GetStatValue,
     ParseThreshold = RealEmergencies.ParseThreshold,
+    ParseStatThreshold = RealEmergencies.ParseStatThreshold,
     IsTriggered = RealEmergencies.IsTriggered,
     IsResolved = RealEmergencies.IsResolved,
 }
@@ -809,6 +869,20 @@ local function SetSanity(player, current, max)
     player.components.sanity = { current = current, max = max or 100 }
 end
 
+local function SetHunger(player, current, max)
+    player.components.hunger = { current = current, max = max or 100 }
+end
+
+-- The game component is `moisture`; "wetness" is the objective-facing name.
+local function SetWetness(player, current, max)
+    player.components.moisture = { moisture = current, maxmoisture = max or 100 }
+end
+
+-- Temperature is a raw degree reading, not a percentage.
+local function SetTemperature(player, current)
+    player.components.temperature = { current = current }
+end
+
 -- Threshold syntax is explicit about inclusivity.
 local function Parses(text, operator, value)
     local op, val = RealEmergencies.ParseThreshold(text)
@@ -828,6 +902,23 @@ Check("threshold rejects values outside 0-100",
     RealEmergencies.ParseThreshold("<101") == nil
         and RealEmergencies.ParseThreshold(">-1") == nil)
 
+-- `reach_stat`/emergency thresholds are parsed in the stat's own units, so
+-- temperature accepts negative degrees and goes above 100.
+local function StatParses(stat, text, operator, value)
+    local op, val = RealEmergencies.ParseStatThreshold(stat, text)
+    return op == operator and val == value
+end
+Check("temperature accepts a negative threshold",
+    StatParses("temperature", "<0", "<", 0))
+Check("temperature accepts a threshold above 100",
+    StatParses("temperature", ">110", ">", 110))
+Check("temperature rejects values outside its range",
+    RealEmergencies.ParseStatThreshold("temperature", "<-101") == nil
+        and RealEmergencies.ParseStatThreshold("temperature", ">201") == nil)
+Check("wetness uses the percentage range",
+    StatParses("wetness", ">50", ">", 50)
+        and RealEmergencies.ParseStatThreshold("wetness", "<101") == nil)
+
 -- Stat reads use raw fields, not GetPercent (which sanity masks).
 local stat_player = NewInst(3001)
 SetHealth(stat_player, 40, 100)
@@ -836,10 +927,27 @@ Check("health fraction uses current/max",
 SetSanity(stat_player, 25, 50)
 Check("sanity fraction uses current/max",
     math.abs(RealEmergencies.GetStatFraction(stat_player, "sanity") - 0.5) < 0.0001)
+SetHunger(stat_player, 30, 100)
+Check("hunger fraction uses current/max",
+    math.abs(RealEmergencies.GetStatFraction(stat_player, "hunger") - 0.3) < 0.0001)
+SetWetness(stat_player, 60, 100)
+Check("wetness fraction uses moisture/maxmoisture",
+    math.abs(RealEmergencies.GetStatFraction(stat_player, "wetness") - 0.6) < 0.0001)
+SetTemperature(stat_player, -5)
+Check("temperature reads raw degrees",
+    RealEmergencies.GetStatValue(stat_player, "temperature") == -5)
+Check("temperature has no fraction",
+    RealEmergencies.GetStatFraction(stat_player, "temperature") == nil)
 Check("missing stat fraction is nil",
     RealEmergencies.GetStatFraction(NewInst(3002), "health") == nil)
+Check("missing hunger fraction is nil",
+    RealEmergencies.GetStatFraction(NewInst(3002), "hunger") == nil)
+Check("missing wetness value is nil",
+    RealEmergencies.GetStatValue(NewInst(3002), "wetness") == nil)
+Check("missing temperature value is nil",
+    RealEmergencies.GetStatValue(NewInst(3002), "temperature") == nil)
 Check("unknown stat fraction is nil",
-    RealEmergencies.GetStatFraction(stat_player, "hunger") == nil)
+    RealEmergencies.GetStatFraction(stat_player, "mightiness") == nil)
 
 -- Operator boundaries: < excludes, <= includes, >= includes.
 local inclusive_entry = {
@@ -858,6 +966,78 @@ Check(">= includes the boundary",
 SetHealth(boundary_player, 74, 100)
 Check(">= excludes below the boundary",
     not RealEmergencies.IsResolved(resolve_entry, boundary_player))
+
+-- Temperature thresholds are raw degrees, so freezing is a low threshold and
+-- overheating a high one.
+local freezing_entry = {
+    trigger = { kind = "stat", stat = "temperature", threshold = "<0" },
+}
+local temperature_player = NewInst(3004)
+SetTemperature(temperature_player, -5)
+Check("temperature below zero triggers freezing",
+    RealEmergencies.IsTriggered(freezing_entry, temperature_player))
+SetTemperature(temperature_player, 5)
+Check("temperature above zero does not trigger freezing",
+    not RealEmergencies.IsTriggered(freezing_entry, temperature_player))
+
+-- Hound-wave conditions: warning and spawn-in are world state, and "clear"
+-- also requires no living wave hound near the player.
+local hound_world = { warning = true, attacking = false }
+TheWorld.components = {
+    hounded = {
+        GetWarning = function() return hound_world.warning end,
+        GetAttacking = function() return hound_world.attacking end,
+    },
+}
+local hound_entry = {
+    trigger = { kind = "hounds", state = "warning" },
+    resolve = { kind = "hounds", state = "clear" },
+}
+local hound_player = NewInst(3100)
+Check("hound warning triggers",
+    RealEmergencies.IsTriggered(hound_entry, hound_player))
+Check("hound warning is not clear",
+    not RealEmergencies.IsResolved(hound_entry, hound_player))
+
+hound_world.warning = false
+hound_world.attacking = true
+Check("hound spawning is not clear",
+    not RealEmergencies.IsResolved(hound_entry, hound_player))
+
+hound_world.attacking = false
+Check("no warning, no spawn and no hound is clear",
+    RealEmergencies.IsResolved(hound_entry, hound_player))
+
+-- The proximity scan calls `HasTag`, so give the fixtures the entity method
+-- rather than teaching the mod to read the test's `tags` table.
+local function StubHound(x, z, tags)
+    local entity = { prefab = "hound", x = x, z = z, tags = tags }
+    function entity:HasTag(tag)
+        return self.tags[tag] == true
+    end
+    return entity
+end
+
+TheSim.entities = { StubHound(0, 0, { hound = true }) }
+Check("a nearby wave hound keeps the card open",
+    not RealEmergencies.IsResolved(hound_entry, hound_player))
+
+TheSim.entities = { StubHound(0, 0, { hound = true, pet_hound = true }) }
+Check("a pet hound does not keep the card open",
+    RealEmergencies.IsResolved(hound_entry, hound_player))
+
+TheSim.entities = { StubHound(999, 0, { hound = true }) }
+Check("a distant hound does not keep the card open",
+    RealEmergencies.IsResolved(hound_entry, hound_player))
+
+local dead_hound = StubHound(0, 0, { hound = true })
+dead_hound.components = { health = { IsDead = function() return true end } }
+TheSim.entities = { dead_hound }
+Check("a dead hound does not keep the card open",
+    RealEmergencies.IsResolved(hound_entry, hound_player))
+
+TheSim.entities = {}
+TheWorld.components = nil
 
 -- Trigger on a stat event, with partial chain progress to preserve.
 local em_manager, em_player = Spawn()
@@ -977,6 +1157,19 @@ local server_manager, server_player = Spawn()
 SetHealth(server_player, 40, 100)
 server_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
 Check("server mode triggers", State(server_player) == "emergency")
+
+-- Only a resolved card counts as seen. A save taken while the card is still
+-- up must not suppress the entry: a relog before it resolves gets the card
+-- again, even in "server" mode.
+local interrupted_save = server_manager:OnSave()
+Check("an unresolved emergency is not saved as fired",
+    interrupted_save.fired_emergencies == nil
+        or interrupted_save.fired_emergencies["harness_emergency_health"] == nil)
+
+SetHealth(server_player, 80, 100)
+server_player:Fire("healthdelta", { oldpercent = 0.4, newpercent = 0.8, amount = 40 })
+Check("server mode resolves", State(server_player) == "won")
+
 local server_save = server_manager:OnSave()
 Check("server mode saves the fired set",
     type(server_save.fired_emergencies) == "table"
@@ -1036,6 +1229,14 @@ Check("jump lands on mission 2",
 Check("jump clears the overlay", jump_manager.emergency == nil
     and jump_manager.suspended_mission == nil)
 
+-- A card interrupted before it resolves was never "won", so it was never
+-- marked as seen: the same trigger pops it again.
+Check("an interrupted emergency was not marked fired",
+    jump_manager.fired_emergencies["harness_emergency_health"] == nil)
+jump_player:Fire("healthdelta", { oldpercent = 0.4, newpercent = 0.4, amount = 0 })
+Check("an interrupted emergency can fire again", State(jump_player) == "emergency")
+jump_manager:JumpTo(2)
+
 jump_manager.fired_emergencies["harness_emergency_health"] = true
 jump_manager:JumpTo(2)
 Check("a jump keeps the fired set",
@@ -1043,6 +1244,146 @@ Check("a jump keeps the fired set",
 jump_manager:Reset()
 Check("reset clears the fired set",
     next(jump_manager.fired_emergencies) == nil)
+
+-- Hound emergency end-to-end: the `houndwarning` event pops the card at the
+-- first bark, and the poll closes it once the wave is clear. A dedicated entry
+-- table keeps the shared synthetic fixtures on their stat emergencies.
+local hound_emergency = {
+    id = "harness_emergency_hounds",
+    title = "Harness Hounds",
+    subtext = "Barking.",
+    resolved_subtext = "Quiet.",
+    trigger = { kind = "hounds", state = "warning" },
+    resolve = { kind = "hounds", state = "clear" },
+    objectives = {
+        { type = "kill", prefab = "hound", count = 1, label = "Kill a hound", optional = true },
+    },
+}
+local hound_manager, hound_fixture = Spawn()
+local hound_emergencies = package.loaded["guidedmissions/emergencies"]
+local saved_entries = hound_emergencies.entries
+hound_emergencies.entries = { hound_emergency }
+local hound_flags = { warning = true, attacking = false }
+TheWorld.components = {
+    hounded = {
+        GetWarning = function() return hound_flags.warning end,
+        GetAttacking = function() return hound_flags.attacking end,
+    },
+}
+hound_fixture:Fire("houndwarning", 0)
+Check("houndwarning pops the hound emergency",
+    State(hound_fixture) == "emergency")
+Check("hound emergency suspends the chain",
+    hound_manager.suspended_mission == SyntheticMissions[1])
+hound_flags.warning = false
+hound_manager:CheckEmergencies()
+Check("a clear wave shows the recovered card", State(hound_fixture) == "won")
+Check("the recovered card uses resolved_subtext",
+    Read(hound_fixture)["guidedmissions.subtext"] == "Quiet.")
+TheWorld.components = nil
+hound_emergencies.entries = saved_entries
+Advance(3)
+Check("chain restored after the hound emergency",
+    Read(hound_fixture)["guidedmissions.title"] == "Harness First")
+
+-- Hunger uses the same stat machinery; its component pushes `hungerdelta` from
+-- the 1 Hz decay task. A dedicated entry keeps the shared fixtures unchanged.
+local hunger_emergency = {
+    id = "harness_emergency_hunger",
+    title = "Harness Hunger",
+    subtext = "Empty.",
+    resolved_subtext = "Fed.",
+    trigger = { kind = "stat", stat = "hunger", threshold = "<25" },
+    resolve = { kind = "stat", stat = "hunger", threshold = ">=50" },
+    objectives = {
+        { type = "reach_stat", stat = "hunger", threshold = ">=50",
+          label = "Get hunger back to 50%" },
+        { type = "eat", prefab = "berries", count = 1,
+          label = "Eat berries", optional = true },
+    },
+}
+local hunger_manager, hunger_player = Spawn()
+local hunger_emergencies = package.loaded["guidedmissions/emergencies"]
+local saved_hunger_entries = hunger_emergencies.entries
+hunger_emergencies.entries = { hunger_emergency }
+SetHunger(hunger_player, 40, 100)
+hunger_player:Fire("hungerdelta", { oldpercent = 1, newpercent = 0.4, delta = -60 })
+Check("40% hunger is not low enough to trigger", State(hunger_player) == "active")
+SetHunger(hunger_player, 20, 100)
+hunger_player:Fire("hungerdelta", { oldpercent = 0.4, newpercent = 0.2, delta = -20 })
+Check("low hunger pops the emergency", State(hunger_player) == "emergency")
+Check("hunger goal row is live", Row(hunger_player, 1)[3] == "20/50%")
+SetHunger(hunger_player, 60, 100)
+hunger_player:Fire("hungerdelta", { oldpercent = 0.2, newpercent = 0.6, delta = 40 })
+Check("a fed player shows the recovered card", State(hunger_player) == "won")
+Check("hunger recovered card subtext",
+    Read(hunger_player)["guidedmissions.subtext"] == "Fed.")
+hunger_emergencies.entries = saved_hunger_entries
+Advance(3)
+Check("chain restored after the hunger emergency",
+    Read(hunger_player)["guidedmissions.title"] == "Harness First")
+
+-- Wetness is high-is-bad (trigger >50, resolve <=20). Its component pushes
+-- `moisturedelta` every frame, so the manager reads it on the 1 Hz poll.
+local wet_emergency = {
+    id = "harness_emergency_wet",
+    title = "Harness Wet",
+    subtext = "Soaked.",
+    resolved_subtext = "Dry.",
+    trigger = { kind = "stat", stat = "wetness", threshold = ">50" },
+    resolve = { kind = "stat", stat = "wetness", threshold = "<=20" },
+    objectives = {
+        { type = "reach_stat", stat = "wetness", threshold = "<=20",
+          label = "Dry off to 20%" },
+    },
+}
+local wet_manager, wet_player = Spawn()
+local wet_emergencies = package.loaded["guidedmissions/emergencies"]
+local saved_wet_entries = wet_emergencies.entries
+wet_emergencies.entries = { wet_emergency }
+SetWetness(wet_player, 60, 100)
+Advance(1)
+Check("60% wetness pops the emergency", State(wet_player) == "emergency")
+Check("wetness goal row is live", Row(wet_player, 1)[3] == "60/20%")
+SetWetness(wet_player, 10, 100)
+Advance(1)
+Check("drying off shows the recovered card", State(wet_player) == "won")
+wet_emergencies.entries = saved_wet_entries
+Advance(3)
+Check("chain restored after the wetness emergency",
+    Read(wet_player)["guidedmissions.title"] == "Harness First")
+
+-- Temperature is in degrees. Overheating is high-is-bad (trigger >70,
+-- resolve <=50); the same machinery handles freezing with a low threshold.
+local heat_emergency = {
+    id = "harness_emergency_heat",
+    title = "Harness Heat",
+    subtext = "Hot.",
+    resolved_subtext = "Cool.",
+    trigger = { kind = "stat", stat = "temperature", threshold = ">70" },
+    resolve = { kind = "stat", stat = "temperature", threshold = "<=50" },
+    objectives = {
+        { type = "reach_stat", stat = "temperature", threshold = "<=50",
+          label = "Cool down to 50°" },
+    },
+}
+local heat_manager, heat_player = Spawn()
+local heat_emergencies = package.loaded["guidedmissions/emergencies"]
+local saved_heat_entries = heat_emergencies.entries
+heat_emergencies.entries = { heat_emergency }
+SetTemperature(heat_player, 80)
+Advance(1)
+Check("80 degrees pops the overheating emergency",
+    State(heat_player) == "emergency")
+Check("temperature goal row uses degrees",
+    Row(heat_player, 1)[3] == "80/50°")
+SetTemperature(heat_player, 40)
+Advance(1)
+Check("cooling off shows the recovered card", State(heat_player) == "won")
+heat_emergencies.entries = saved_heat_entries
+Advance(3)
+Check("chain restored after the overheating emergency",
+    Read(heat_player)["guidedmissions.title"] == "Harness First")
 
 -- No trigger during the chain's won hold or after the chain is complete.
 local hold_manager, hold_player = Spawn()
@@ -1482,6 +1823,45 @@ type_fixtures.reach_stat = function()
     player.components.health.currenthealth = 80
     Advance(1)
     Check("reach_stat completes at the threshold", State(player) == "won")
+
+    -- Hunger is a valid reach_stat stat and uses the HUD hunger badge.
+    local hunger_manager, hunger_player = Spawn(function(target)
+        target.components.hunger = { current = 30, max = 100 }
+    end)
+    Activate(hunger_manager, hunger_player, {
+        id = "fixture_reach_hunger",
+        title = "Fed",
+        subtext = "Eat.",
+        objectives = {
+            { type = "reach_stat", stat = "hunger", threshold = ">=50",
+              label = "Get hunger back to 50%" },
+        },
+    })
+    Check("reach_stat hunger icon is the hunger badge",
+        Row(hunger_player, 1)[2] == "hunger")
+    Check("reach_stat hunger counter", Row(hunger_player, 1)[3] == "30/50%")
+    hunger_player.components.hunger.current = 60
+    Advance(1)
+    Check("reach_stat hunger completes", State(hunger_player) == "won")
+
+    -- Temperature uses raw degrees in the counter.
+    local temp_manager, temp_player = Spawn(function(target)
+        target.components.temperature = { current = 80 }
+    end)
+    Activate(temp_manager, temp_player, {
+        id = "fixture_reach_temperature",
+        title = "Cool Off",
+        subtext = "Hot.",
+        objectives = {
+            { type = "reach_stat", stat = "temperature", threshold = "<=50",
+              label = "Cool down to 50°" },
+        },
+    })
+    Check("reach_stat temperature counter uses degrees",
+        Row(temp_player, 1)[3] == "80/50°")
+    temp_player.components.temperature.current = 40
+    Advance(1)
+    Check("reach_stat temperature completes", State(temp_player) == "won")
 end
 
 type_fixtures.heal = function()
@@ -1892,6 +2272,198 @@ type_fixtures.fertilize = function()
     Check("fertilize icon override wins", Row(icon_player, 1)[2] == "berries")
 end
 
+type_fixtures.equip = function()
+    -- `tags` drives the entity's HasTag; `has_armor` adds the armor component.
+    local function EquipItem(prefab, tags, has_armor)
+        local item = { prefab = prefab, components = {} }
+        if has_armor then
+            item.components.armor = {}
+        end
+        function item:HasTag(tag)
+            return tags ~= nil and tags[tag] == true
+        end
+        return item
+    end
+
+    -- Prefab filter, and live semantics: a second required row keeps the
+    -- mission active so the row can be seen going on and off.
+    local fixture_manager, player = Spawn()
+    Activate(fixture_manager, player, {
+        id = "fixture_equip",
+        title = "Armed",
+        subtext = "Hold something useful.",
+        objectives = {
+            { type = "equip", prefab = "spear", label = "Equip a spear" },
+            { type = "collect", prefab = "flint", count = 99, label = "Hold flint" },
+        },
+    })
+    Check("equip label is rendered", Row(player, 1)[1] == "Equip a spear")
+    Check("equip icon is the prefab", Row(player, 1)[2] == "spear")
+    Check("equip starts unchecked", Row(player, 1)[3] == "0/1")
+
+    player.components.inventory.equipslots.hands = EquipItem("axe", { weapon = true, tool = true })
+    player:Fire("equip", {})
+    Check("a different prefab does not check the row", Row(player, 1)[3] == "0/1")
+
+    player.components.inventory.equipslots.hands = EquipItem("spear", { weapon = true })
+    player:Fire("equip", {})
+    Check("equipping the prefab checks the row", Row(player, 1)[3] == "1/1")
+    Check("the other required row still gates completion", State(player) == "active")
+
+    player.components.inventory.equipslots.hands = nil
+    player:Fire("unequip", {})
+    Check("unequipping unchecks the live row", Row(player, 1)[3] == "0/1")
+
+    -- A category is a trait: the axe (weapon and tool) satisfies either.
+    local weapon_manager, weapon_player = Spawn()
+    Activate(weapon_manager, weapon_player, {
+        id = "fixture_equip_weapon",
+        title = "Any Weapon",
+        subtext = "Something sharp.",
+        objectives = {
+            { type = "equip", category = "weapon", label = "Equip a weapon" },
+        },
+    })
+    Check("weapon category default icon", Row(weapon_player, 1)[2] == "spear")
+    weapon_player.components.inventory.equipslots.hands = EquipItem("log")
+    weapon_player:Fire("equip", {})
+    Check("a non-weapon does not satisfy the weapon category",
+        State(weapon_player) == "active")
+    weapon_player.components.inventory.equipslots.hands = EquipItem("axe", { weapon = true, tool = true })
+    weapon_player:Fire("equip", {})
+    Check("an axe satisfies the weapon category", State(weapon_player) == "won")
+
+    local tool_manager, tool_player = Spawn()
+    Activate(tool_manager, tool_player, {
+        id = "fixture_equip_tool",
+        title = "Any Tool",
+        subtext = "Something useful.",
+        objectives = {
+            { type = "equip", category = "tool", label = "Equip a tool" },
+        },
+    })
+    Check("tool category default icon", Row(tool_player, 1)[2] == "axe")
+    tool_player.components.inventory.equipslots.hands = EquipItem("spear", { weapon = true })
+    tool_player:Fire("equip", {})
+    Check("a weapon alone is not a tool", State(tool_player) == "active")
+    tool_player.components.inventory.equipslots.hands = EquipItem("pickaxe", { weapon = true, tool = true })
+    tool_player:Fire("equip", {})
+    Check("a pickaxe satisfies the tool category", State(tool_player) == "won")
+
+    local armor_manager, armor_player = Spawn()
+    Activate(armor_manager, armor_player, {
+        id = "fixture_equip_armor",
+        title = "Armor Up",
+        subtext = "Take a hit.",
+        objectives = {
+            { type = "equip", category = "armor", label = "Equip armor" },
+        },
+    })
+    Check("armor category default icon", Row(armor_player, 1)[2] == "armorwood")
+    armor_player.components.inventory.equipslots.body = EquipItem("backpack")
+    armor_player:Fire("equip", {})
+    Check("a backpack is not armor", State(armor_player) == "active")
+    armor_player.components.inventory.equipslots.body = EquipItem("armorwood", nil, true)
+    armor_player:Fire("equip", {})
+    Check("a log suit satisfies the armor category", State(armor_player) == "won")
+
+    -- Category and slot combine.
+    local slot_manager, slot_player = Spawn()
+    Activate(slot_manager, slot_player, {
+        id = "fixture_equip_slot",
+        title = "Helmet",
+        subtext = "Protect your head.",
+        objectives = {
+            { type = "equip", category = "armor", slot = "head",
+              label = "Wear a helmet" },
+        },
+    })
+    slot_player.components.inventory.equipslots.body = EquipItem("armorwood", nil, true)
+    slot_player:Fire("equip", {})
+    Check("body armor does not satisfy the head slot", State(slot_player) == "active")
+    slot_player.components.inventory.equipslots.head = EquipItem("footballhat", nil, true)
+    slot_player:Fire("equip", {})
+    Check("head armor satisfies category and slot", State(slot_player) == "won")
+
+    -- No filter: any equipped item, with no default icon.
+    local any_manager, any_player = Spawn()
+    Activate(any_manager, any_player, {
+        id = "fixture_equip_any",
+        title = "Anything",
+        subtext = "Put it on.",
+        objectives = {
+            { type = "equip", label = "Equip an item" },
+        },
+    })
+    Check("unfiltered equip row is text-only", Row(any_player, 1)[2] == "")
+    any_player.components.inventory.equipslots.body = EquipItem("backpack")
+    any_player:Fire("equip", {})
+    Check("any equipped item satisfies an unfiltered row", State(any_player) == "won")
+
+    -- Already equipped when the mission starts counts immediately.
+    local start_manager, start_player = Spawn(function(target)
+        target.components.inventory.equipslots.hands = EquipItem("spear", { weapon = true })
+    end)
+    Activate(start_manager, start_player, {
+        id = "fixture_equip_initial",
+        title = "Already Armed",
+        subtext = "Good.",
+        objectives = {
+            { type = "equip", prefab = "spear", label = "Equip a spear" },
+            { type = "collect", prefab = "flint", count = 99, label = "Hold flint" },
+        },
+    })
+    Check("equipment worn at mission start counts", Row(start_player, 1)[3] == "1/1")
+end
+
+type_fixtures.tip = function()
+    -- A tip is informational: it renders after the required rows in the
+    -- optional group, has no icon and never completes. Otherwise it is an
+    -- ordinary row -- in particular it carries a normal 0/1 counter, because a
+    -- blank counter measures nil in the HUD's text widget and breaks the row
+    -- layout. It is optional whether or not the flag is set.
+    local fixture_manager, player = Spawn()
+    Activate(fixture_manager, player, {
+        id = "fixture_tip",
+        title = "Under the Boughs",
+        subtext = "Trees keep the rain off.",
+        objectives = {
+            { type = "collect", prefab = "flint", count = 1, label = "Collect flint" },
+            { type = "tip", label = "Stand under a tree" },
+        },
+    })
+    Check("tip renders after the required rows", Row(player, 2)[1] == "Stand under a tree")
+    Check("tip row is always optional", Row(player, 2)[5] == "1")
+    Check("tip row renders a normal counter", Row(player, 2)[3] == "0/1")
+    Check("tip row has no icon by default", Row(player, 2)[2] == "")
+    Check("tip row is never checked", Row(player, 2)[4] == "0")
+
+    -- Unrelated events must not move it, and it never satisfies the mission.
+    player:Fire("builditem", Build("torch"))
+    player:Fire("killed", { victim = { prefab = "treeguard" } })
+    Check("tip ignores objective events", Row(player, 2)[4] == "0")
+    Check("tip alone does not complete the mission", State(player) == "active")
+
+    Carry(player, "flint", 1)
+    InventoryChanged(player)
+    Check("required row completes while the tip stays unchecked",
+        State(player) == "won" and Row(player, 2)[4] == "0")
+    Check("won card still flags the tip as optional", Row(player, 2)[5] == "1")
+
+    -- `icon` is the only other field a tip reads.
+    local icon_manager, icon_player = Spawn()
+    Activate(icon_manager, icon_player, {
+        id = "fixture_tip_icon",
+        title = "Under the Boughs",
+        subtext = "Trees keep the rain off.",
+        objectives = {
+            { type = "collect", prefab = "flint", count = 1, label = "Collect flint" },
+            { type = "tip", icon = "log", label = "Stand under a tree" },
+        },
+    })
+    Check("tip icon override is rendered", Row(icon_player, 2)[2] == "log")
+end
+
 -- Every VALID_TYPE must have a fixture, and no fixture may outlive its type.
 local type_names = {}
 for objective_type in pairs(Objectives.VALID_TYPES) do
@@ -1932,6 +2504,9 @@ for i, mission in ipairs(RealMissions) do
     local rows = Rows(Read(player)["guidedmissions.rows"])
     Check(label .. " one row per objective", #rows == #(mission.objectives or {}))
 
+    -- Every row must carry a label, a counter and a done flag. A blank counter
+    -- breaks the HUD's row layout (see BuildRows in the tracker), so no type may
+    -- emit one.
     local well_formed = true
     for _, fields in ipairs(rows) do
         if fields[1] == nil or fields[1] == ""
@@ -1959,6 +2534,8 @@ for i, entry in ipairs(RealEmergencies.entries) do
     local rows = Rows(Read(player)["guidedmissions.rows"])
     Check(label .. " one row per objective", #rows == #(entry.objectives or {}))
 
+    -- Same contract as the mission smoke: a non-empty label, counter and done
+    -- flag on every row.
     local well_formed = true
     for _, fields in ipairs(rows) do
         if fields[1] == nil or fields[1] == ""

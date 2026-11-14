@@ -14,6 +14,32 @@ local Objectives = {}
 -- See docs/dst-api.md, "Finding entities near a player".
 local SHARED_STRUCTURE_RADIUS = 45
 
+-- Equipment classification for `equip` rows. Vanilla has no `armor` tag:
+-- weapons and tools carry the `weapon`/`tool` tags (components/weapon.lua:29,
+-- components/tool.lua:18), while armour is any item with an `armor` component.
+-- Many items carry both weapon and tool tags (axe, pickaxe), so a category is a
+-- trait, not an exclusive class. See docs/dst-api.md, "Equipment".
+local EQUIP_CATEGORY_TESTS = {
+    weapon = function(item) return item:HasTag("weapon") end,
+    tool = function(item) return item:HasTag("tool") end,
+    armor = function(item)
+        return item.components ~= nil and item.components.armor ~= nil
+    end,
+}
+
+-- Exported for mission-data validation in tests/manager_test.lua. Slots are the
+-- DST `EQUIPSLOTS` values (constants.lua:654-660).
+Objectives.EQUIP_CATEGORIES = { weapon = true, tool = true, armor = true }
+Objectives.EQUIP_SLOTS = { hands = true, head = true, body = true, beard = true }
+
+-- Default row icons for live stat rows. The tracker maps these ids to the HUD
+-- status-badge art (status_health/status_sanity/status_hunger).
+local STAT_ICON_PREFABS = {
+    health = "heart",
+    sanity = "brain",
+    hunger = "hunger",
+}
+
 function Objectives.GetCurrentDay()
     local world = GLOBAL.TheWorld
     -- DST has no `TheWorld.state.day`; the server's world state is
@@ -32,9 +58,10 @@ function Objectives.GetLabel(objective)
 end
 
 -- Optional objectives are tracked and rendered like any other, but never block
--- mission completion (`optional = true` in mission data).
+-- mission completion (`optional = true` in mission data). A `tip` is guidance,
+-- not a goal, so it is always optional whatever the flag says.
 function Objectives.IsOptional(objective)
-    return objective.optional == true
+    return objective.type == "tip" or objective.optional == true
 end
 
 -- Shared build rows accept another player's copy of the structure when
@@ -54,16 +81,18 @@ function Objectives.GetCounter(objective, progress)
     end
 
     if objective.type == "reach_stat" then
-        -- A live percentage, not a count: "40/75%". Only the target carries the
-        -- unit, matching the "current/target" style of every other counter. The
-        -- tracker replaces the counter with a checkmark once the threshold is
-        -- met.
-        local _, target = Conditions.ParseThreshold(objective.threshold)
+        -- A live value, not a count: "40/75%" or "35/70°" for temperature. Only
+        -- the target carries the unit, matching the "current/target" style of
+        -- every other counter. The tracker replaces the counter with a checkmark
+        -- once the threshold is met.
+        local _, target =
+            Conditions.ParseStatThreshold(objective.stat, objective.threshold)
         if target == nil then
             return ""
         end
         local value = math.floor(tonumber(progress) or 0)
-        return string.format("%d/%d%%", value, target)
+        return string.format("%d/%d%s", value, target,
+            Conditions.GetStatUnit(objective.stat))
     end
 
     local target = tonumber(objective.count) or 1
@@ -88,10 +117,14 @@ end
 -- The prefab whose inventory icon illustrates this objective, or nil when the
 -- objective has no item icon (survive rows render text-only).
 function Objectives.GetIconPrefab(objective)
+    if objective.type == "tip" then
+        -- A tip has no prefab, so it draws nothing unless the mission names an
+        -- icon (`stand under a tree` has no item art to fall back on).
+        return objective.icon
+    end
     if objective.type == "reach_stat" then
         -- The same HUD badge glyphs the heal/sanity rows use, chosen by stat.
-        return objective.icon
-            or (objective.stat == "health" and "heart" or "brain")
+        return objective.icon or STAT_ICON_PREFABS[objective.stat]
     end
     if objective.type == "sleep" then
         -- Tents and bedrolls are world/inventory objects without a useful row
@@ -158,6 +191,25 @@ function Objectives.GetIconPrefab(objective)
         -- unfiltered row shows the rot item, the most common fertilizer.
         return objective.icon or objective.prefab or "rot"
     end
+    if objective.type == "equip" then
+        -- A named prefab shows its own art. A category falls back to a
+        -- representative vanilla item; a slot-only filter has no single item,
+        -- so the row is text-only unless `icon` names one.
+        if objective.icon ~= nil then
+            return objective.icon
+        end
+        if objective.prefab ~= nil then
+            return objective.prefab
+        end
+        if objective.category == "weapon" then
+            return "spear"
+        elseif objective.category == "tool" then
+            return "axe"
+        elseif objective.category == "armor" then
+            return "armorwood"
+        end
+        return nil
+    end
 
     if objective.type == "collect" or objective.type == "craft"
         or objective.type == "build" or objective.type == "kill"
@@ -173,7 +225,8 @@ function Objectives.IsComplete(objective, progress)
     end
 
     if objective.type == "reach_stat" then
-        local operator, target = Conditions.ParseThreshold(objective.threshold)
+        local operator, target =
+            Conditions.ParseStatThreshold(objective.stat, objective.threshold)
         if operator == nil then
             return false
         end
@@ -264,9 +317,51 @@ local function CountNearbyStructures(inst, prefab)
     return count
 end
 
--- Live rows the manager rereads on stat events and once per second, so they
--- follow current world state rather than an accumulated count:
+-- Whether an equipped item satisfies the row's filters. Filters combine with
+-- AND; no filters means any equipped item counts.
+local function MatchesEquip(objective, item)
+    if item == nil then
+        return false
+    end
+    if objective.prefab ~= nil and item.prefab ~= objective.prefab then
+        return false
+    end
+    if objective.category ~= nil then
+        local matches = EQUIP_CATEGORY_TESTS[objective.category]
+        if matches == nil or not matches(item) then
+            return false
+        end
+    end
+    return true
+end
+
+-- True while a matching item is in one of the player's equipment slots.
+-- `equipslots` is a public table keyed by EQUIPSLOTS (docs/dst-api.md,
+-- "Equipment"). `slot` narrows the search to one slot; without it every slot is
+-- checked, including the beard slot.
+function Objectives.HasEquipped(inst, objective)
+    local inventory = inst ~= nil and inst.components ~= nil
+        and inst.components.inventory or nil
+    local equipslots = inventory ~= nil and inventory.equipslots or nil
+    if equipslots == nil then
+        return false
+    end
+
+    if objective.slot ~= nil then
+        return MatchesEquip(objective, equipslots[objective.slot])
+    end
+    for _, item in pairs(equipslots) do
+        if MatchesEquip(objective, item) then
+            return true
+        end
+    end
+    return false
+end
+
+-- Live rows the manager rereads on stat/equip events and once per second, so
+-- they follow current state rather than an accumulated count:
 --   * `reach_stat` mirrors the live stat percentage (0-100);
+--   * `equip` is 1 while a matching item is worn and 0 otherwise;
 --   * a `shared` build row counts nearby copies of its structure when
 --     Multiplayer Mode is on.
 -- Returns nil for anything else (and for a shared row with nothing nearby), so
@@ -287,14 +382,16 @@ function Objectives.LiveProgress(inst, objective)
         return math.min(nearby, target)
     end
 
+    if objective.type == "equip" then
+        return Objectives.HasEquipped(inst, objective) and 1 or 0
+    end
+
     if objective.type ~= "reach_stat" then
         return nil
     end
-    local fraction = Conditions.GetStatFraction(inst, objective.stat)
-    if fraction == nil then
-        return nil
-    end
-    return fraction * 100
+    -- Already in the stat's threshold units: percent for health/sanity/hunger/
+    -- wetness, degrees for temperature.
+    return Conditions.GetStatValue(inst, objective.stat)
 end
 
 function Objectives.InitialProgress(inst, objective)
@@ -587,6 +684,8 @@ Objectives.VALID_TYPES = {
     sleep = true,
     fertilize = true,
     reach_stat = true,
+    equip = true,
+    tip = true,
 }
 
 return Objectives

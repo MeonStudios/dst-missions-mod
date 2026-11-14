@@ -45,6 +45,8 @@ dimmed; authored order is kept within each group. Every mission must have at lea
 required objective; a mission of only optional objectives would complete the moment it
 starts.
 
+A `tip` row is always optional and never completes at all — see [`tip`](#tip) below.
+
 Missions run in file order. Each player advances independently after a 3-second
 "won" hold. The last mission is followed by a terminal "All Missions Complete" card.
 
@@ -77,9 +79,10 @@ half-updated translation degrades gracefully instead of crashing.
 Pop-up emergencies are a separate, unordered collection in
 [`emergencies.lua`](../scripts/guidedmissions/emergencies.lua). They reuse the objective
 schema on this page, but each entry has `trigger`/`resolve` conditions instead of a chain
-position, and **every emergency objective must set `optional = true`** — the card
-resolves on a stat threshold, never on objective completion. See
-[`emergencies.md`](emergencies.md) for the full schema.
+position. A **stat** emergency has exactly one required `reach_stat` goal row matching
+its resolve threshold, plus any number of optional rows; a **hound-wave** emergency has
+only optional rows. Either way the card resolves on its condition, never on objective
+completion. See [`emergencies.md`](emergencies.md) for the full schema.
 
 ## How progress is counted
 
@@ -91,15 +94,20 @@ There are three mechanisms:
   Progress is the **peak holding** seen since the mission started — spending or
   dropping items never removes credit, but picking items up later can raise it.
   The inventory at the moment the mission starts counts as the starting value.
-- **World-state (polled every second):** `survive` reads the world day. Polling
-  runs only for missions that contain a survive objective.
+- **Live state (polled every second):** `survive` reads the world day, `equip`
+  mirrors the current equipment slots, and `reach_stat` mirrors its stat.
+  Equip rows also refresh immediately on `equip`/`unequip`, and
+  health/sanity/hunger rows on their `*delta` events; wetness and temperature
+  rely on the poll because those components emit every frame. The survive read
+  only syncs when the world day changes.
 - **Event-driven:** everything else. Each event adds an increment (usually 1, but
   `heal`/`sanity` add points).
 
 Rows render as `label`, icon, `progress/count`, and a green check when done. Optional
 rows sit in their own group below an `Optional` heading and use a dimmer colour. During
 the completion hold the required rows are shown checked; optional rows show their real
-state, so an unfinished optional objective is visibly left unchecked.
+state, so an unfinished optional objective is visibly left unchecked. A `tip` row is
+not counted at all: its counter stays at `0/1` and it never checks.
 
 ## Icons
 
@@ -107,8 +115,10 @@ The server writes an icon id per row; the HUD resolves it as:
 
 1. `brain` → the HUD sanity-badge art (`images/global_redux.xml`).
 2. `heart` → the HUD health-badge art (`images/global_redux.xml`).
-3. `flower` → the world flower animation (flowers have no inventory icon).
-4. Any other id `<id>` → `images/inventoryimages*.xml` lookup for `<id>.tex`.
+3. `hunger` → the HUD hunger-badge art (`images/global_redux.xml`).
+4. `flower` → the world flower animation (flowers have no inventory icon).
+5. `evergreen_normal` → the world tree animation (trees have no inventory icon).
+6. Any other id `<id>` → `images/inventoryimages*.xml` lookup for `<id>.tex`.
 
 Any other id with no matching art draws nothing (the row is text-only), which is a
 safe fallback for modded prefabs. See `docs/dst-api.md`, "HUD icon art", for how the
@@ -282,29 +292,83 @@ Reach a threshold on a stat, read live.
 
 | Field | Required | Default |
 |---|---|---|
-| `stat` | yes | — (`"health"` or `"sanity"`) |
-| `threshold` | yes | — (for example `">=75"`) |
-| `icon` | no | `heart` / `brain` |
+| `stat` | yes | — (`"health"`, `"sanity"`, `"hunger"`, `"wetness"` or `"temperature"`) |
+| `threshold` | yes | — (for example `">=75"` or `"<0"`) |
+| `icon` | no | `heart` / `brain` / `hunger` |
 
 - **Completes when:** the player's stat meets the comparison. The counter shows
-  the current percentage against the threshold, for example `40/75%`.
+  the current value against the threshold: `40/75%` for the percentage stats and
+  `35/70°` for temperature.
 - **Live, not accumulated:** progress mirrors the current stat and can fall as
-  well as rise. It refreshes on `healthdelta`/`sanitydelta` and once per second.
+  well as rise. It refreshes on `healthdelta`/`sanitydelta`/`hungerdelta` and
+  once per second; wetness and temperature are read on the 1-second poll (their
+  components emit every frame, which is too often to forward).
 - **Threshold syntax:** the same strings emergency conditions use — `<`, `<=`,
-  `>`, `>=` followed by a 0-100 value, with optional whitespace. A malformed
-  threshold never completes.
+  `>`, `>=` followed by a value, with optional whitespace. Health, sanity, hunger
+  and wetness use 0-100; temperature uses raw degrees and may be negative
+  (`"<0"` freezing, `">70"` overheating). A malformed or out-of-range threshold
+  never completes.
 - **Already true:** if the condition holds when the mission starts, it completes
   immediately (like `survive`'s past day). Emergencies avoid this because their
-  trigger sits below the goal threshold.
-- **Emergency goal rows:** an emergency's single required objective is a
+  trigger sits on the unsafe side of the goal threshold.
+- **Emergency goal rows:** a stat emergency's single required objective is a
   `reach_stat` whose `stat` and `threshold` match the emergency's `resolve`
   condition (the harness enforces this). The emergency still ends on the resolve
-  condition, not on objective completion.
-- **Icon:** the HUD heart for health and brain for sanity; `icon` overrides.
+  condition, not on objective completion. A hound-wave emergency has no required
+  row.
+- **Icon:** the HUD heart for health, brain for sanity and stomach for hunger;
+  temperature and wetness rows are text-only unless `icon` is set.
 
 ```lua
 { type = "reach_stat", stat = "health", threshold = ">=75", label = "Get back to 75% health" }
 { type = "reach_stat", stat = "sanity", threshold = ">=50", label = "Get sanity back to 50%" }
+{ type = "reach_stat", stat = "hunger", threshold = ">=50", label = "Get back to 50% hunger" }
+{ type = "reach_stat", stat = "wetness", threshold = "<=20", label = "Dry off to 20%" }
+{ type = "reach_stat", stat = "temperature", threshold = ">=15", label = "Warm up to 15°" }
+```
+
+### `equip`
+
+Have a matching item currently equipped.
+
+| Field | Required | Default |
+|---|---|---|
+| `prefab` | no | any item |
+| `category` | no | any (`"weapon"` / `"tool"` / `"armor"`) |
+| `slot` | no | any (`"hands"` / `"head"` / `"body"` / `"beard"`) |
+| `icon` | no | `prefab`, or the category default |
+
+- **Completes when:** a matching item is in one of the player's equipment
+  slots. It is a **live** check, like `reach_stat`: the row is checked while the
+  item is worn and unchecks when it is removed. It refreshes on the `equip` /
+  `unequip` events and once per second.
+- **No `count`:** the row is binary (`0/1`). Setting `count` is rejected by the
+  validation.
+- **Matching:** all fields that are set must match (AND). With none set, any
+  equipped item counts.
+  - `prefab` compares the equipped item's id (`spear`, `armorwood`, `backpack`).
+  - `category = "weapon"` matches the vanilla `weapon` tag; `"tool"` matches the
+    `tool` tag; `"armor"` matches any item with an `armor` component. There is
+    no vanilla `armor` tag. Categories are traits, not exclusive classes: an axe
+    and a pickaxe carry both `weapon` and `tool`, so they satisfy either.
+    The `weapon` tag means "has a weapon component", which includes a few
+    utility items that can swing (compass, brush, bug net); use `prefab` when
+    the mission means one specific weapon.
+  - `slot` matches the equipment slot (`EQUIPSLOTS` in DST). Backpacks and body
+    armour share the `body` slot, so combine `category = "armor"` with a slot
+    when the mission must mean armour specifically.
+- **Already equipped:** if the player is already wearing a matching item when
+  the mission starts, the row starts checked (a mission whose only required row
+  is that equip completes at once).
+- **Icon:** the named `prefab`; otherwise `spear` for weapons, `axe` for tools,
+  `armorwood` (Log Suit) for armour. A slot-only or unfiltered row has no single
+  item and is text-only. `icon` overrides.
+
+```lua
+{ type = "equip", prefab = "spear", label = "Equip a Spear" }
+{ type = "equip", category = "armor", label = "Equip some armor" }
+{ type = "equip", category = "armor", slot = "head", label = "Wear a helmet" }
+{ type = "equip", slot = "hands", icon = "torch", label = "Hold a light source" }
 ```
 
 ### `survive`
@@ -635,6 +699,34 @@ Learn `count` new recipes.
 { type = "prototype", count = 1, prefab = "goldenaxe", label = "Prototype a Golden Axe", icon = "goldenaxe" }
 ```
 
+### `tip`
+
+Show an informational row that never completes.
+
+| Field | Required | Default |
+|---|---|---|
+| `icon` | no | none (text-only) |
+
+- **Completes when:** never. A tip is guidance only: it has no target, no progress,
+  and its row never shows a check. Otherwise it is an ordinary row — it carries the
+  normal `0/1` counter (a blank counter breaks the tracker's row layout, so it must
+  not be blanked).
+- **Always optional:** a tip is rendered in the optional group and never gates
+  completion, whatever the flag says. Do not author `optional = false`; it is inert
+  and the validation rejects it. Every mission still needs at least one real
+  required objective.
+- **No `prefab`, no `count`:** the type has neither field; the validator rejects
+  them.
+- **Icon:** none by default, so the row is text-only. Set `icon` when the tip has
+  an obvious subject: an inventory art id (`log`), or one of the world-anim ids
+  the tracker draws (`flower`, `evergreen_normal`). There is no prefab to derive
+  art from.
+
+```lua
+{ type = "tip", label = "Stand under a tree to stay dry" }
+{ type = "tip", icon = "evergreen_normal", label = "Stand under a tree" }
+```
+
 ## Choosing between similar types
 
 | Goal | Type |
@@ -652,6 +744,8 @@ Learn `count` new recipes.
 | Fertilize a bush or grass tuft | `fertilize` |
 | Sleep in a tent | `sleep` |
 | Reach a stat percentage | `reach_stat` |
+| Have a weapon/tool/armour equipped | `equip` |
+| Show a hint row that is not a goal | `tip` |
 
 ## Event mapping
 
@@ -676,7 +770,9 @@ Learn `count` new recipes.
 | `trap_catch` | `guidedmissions_trapchecked` (mod pushed) | objective `prefab` matched against any entry in `data.loot` |
 | `sleep` | `guidedmissions_slept` (mod pushed) | objective `prefab` matched to `data.bed.prefab` |
 | `fertilize` | `guidedmissions_fertilized` (mod pushed) | objective `prefab` matched to `data.plant.prefab` |
-| `reach_stat` | `healthdelta` / `sanitydelta` + 1 s poll | live stat percentage vs objective `threshold` |
+| `reach_stat` | `healthdelta` / `sanitydelta` / `hungerdelta` + 1 s poll (wetness/temperature: poll only) | live stat value vs objective `threshold` (percent, or degrees for temperature) |
+| `equip` | `equip` / `unequip` + 1 s poll | live `inventory.equipslots`, filtered by `prefab`/`category`/`slot` |
+| `tip` | none | never completes (no progress, no counter) |
 
 `cookedfood`/`stewedfood`/`planted`/`trapchecked`/`slept`/`fertilized` exist
 because vanilla fire cooking, Crock Pot cooking, planting, trap checking, entering

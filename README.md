@@ -45,7 +45,8 @@ Supported objective types:
 | `sleep`   | `count`, optional `prefab` (a bed) | the player enters a tent/siesta hut/bedroll `count` times |
 | `heal`    | `count`           | the player restores `count` health (requested amounts, including overheal) |
 | `sanity`  | `count`           | the player restores `count` sanity (any source, including overflow at full sanity) |
-| `reach_stat` | `stat`, `threshold` | the player's health/sanity meets the threshold (live percentage, e.g. `">=75"`) |
+| `reach_stat` | `stat`, `threshold` | the player's health/sanity/hunger/wetness (percentage) or temperature (degrees) meets the threshold (live, e.g. `">=75"`) |
+| `equip`   | optional `prefab`, `category` (`weapon`/`tool`/`armor`), `slot` (`hands`/`head`/`body`/`beard`) | the player currently has a matching item equipped (live; unchecks when removed) |
 | `mine`    | `count`           | the player finishes mining `count` nodes with a pickaxe |
 | `pick`    | `prefab`, `count` | the player picks `count` of the plant prefab |
 | `plant`   | `count`, optional `prefab` (the held item) | the player plants `count` seeds in tilled soil or deploys `count` dug plants/plantables |
@@ -54,6 +55,7 @@ Supported objective types:
 | `cook`    | `count`, optional `prefab` | the player cooks `count` food items on a fire |
 | `cookpot` | `count`, optional `prefab` | the player starts cooking `count` dishes in a Crock Pot (optional dish filter) |
 | `prototype` | `count`, optional `prefab` (a recipe id) | the player learns `count` new recipes (station prototyping or blueprints) |
+| `tip` | optional `icon` | never — an informational row, always optional, that shows a hint without a goal |
 
 `hint` is optional: hovering the "?" button in the card's title band shows it in a
 tooltip, wrapped to the card and capped at four lines. Missions without a hint show
@@ -153,12 +155,22 @@ other `TECH.NONE` recipes are considered known from the start, so building one f
 first time does not count as a prototype (and `prefab = "axe"` would never
 complete). Use `craft` for those, e.g. `{ type = "craft", prefab = "axe", count = 1 }`.
 
+`equip` is a live check on the player's equipment slots: it is checked while a matching
+item is worn and unchecks when the item is removed. The optional `prefab` names one item
+(`spear`, `armorwood`); `category` filters by vanilla trait (`weapon` and `tool` tags, or
+the `armor` component); and `slot` filters by equipment slot. Filters combine, so
+`category = "armor", slot = "head"` means a helmet specifically. With no filters, any
+equipped item counts. The row has no `count` — it is binary (`0/1`) — and an item already
+equipped when the mission starts counts immediately.
+
 ## Emergency missions
 
 Separate from the ordered chain, the mod can pop up a guidance card when a player's
-health or sanity drops below a threshold. It replaces the current mission card and
-resolves automatically when the stat recovers; the interrupted mission keeps its progress
-and resumes exactly where it was.
+health, sanity or hunger drops below a threshold, wetness climbs too high, the player
+freezes or overheats, or when a hound wave begins (triggered by the first warning bark,
+and cleared once no wave hounds are left nearby). It replaces the current mission card
+and resolves automatically; the interrupted mission keeps its progress and resumes
+exactly where it was.
 
 Emergencies live in
 [`scripts/guidedmissions/emergencies.lua`](scripts/guidedmissions/emergencies.lua):
@@ -178,11 +190,12 @@ Emergencies live in
 ```
 
 Thresholds are strings so inclusivity is explicit: `"<50"` is below 50%, `"<=50"`
-includes 50, `">=75"` includes 75 and above. Every emergency objective must be
-`optional = true`; an emergency ends on its stat condition, never on objective
-completion. **Mods → Configure → Emergency Repeat** controls whether the same emergency
-may fire every time, once per session (default), or once per server/world — per player.
-The full schema is in [`docs/emergencies.md`](docs/emergencies.md).
+includes 50, `">=75"` includes 75 and above. A stat emergency has one required goal row
+matching its resolve threshold; a hound-wave emergency (`trigger = { kind = "hounds",
+state = "warning" }`) has only optional rows. Both end on their condition, never on
+objective completion. **Mods → Configure → Emergency Repeat** controls whether the same
+emergency may fire every time, once per session (default), or once per server/world —
+per player. The full schema is in [`docs/emergencies.md`](docs/emergencies.md).
 
 ## Localization
 
@@ -248,8 +261,9 @@ items.
   showing the active mission and objective progress. Each player can drag it left or
   right with the mouse; the position is saved per player and restored next session.
 - Missions advance automatically when all objectives are complete.
-- A low-health or low-sanity **emergency** can replace the card; it resolves by itself
-  when the stat recovers, and the interrupted mission resumes with its progress intact.
+- A low-health, low-sanity or low-hunger, high-wetness, freezing/overheating
+  **emergency** (or a hound-wave warning) can replace the card; it resolves by itself
+  when the danger passes, and the interrupted mission resumes with its progress intact.
 - With **Multiplayer Mode** on, a shared `build` objective (a fire pit, Science
   Machine, and so on) checks if that structure already stands near you, so one player's
   build serves the group. Every player still has their own mission progress.

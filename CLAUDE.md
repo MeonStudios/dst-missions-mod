@@ -156,7 +156,7 @@ elevated prompt. It only helps this machine; other players need their own copy.
   sh tests/preview/run.sh
   ```
 
-  Outputs `tests/preview/out/{active_2row,hint_2row,hint_open,trap_1row,optional_3row,sanity_2row,heal_2row,emergency_2row,active_1row,won,done,collapsed,de_active_2row,de_hint_open,de_optional_3row,de_day_1row,de_done,ru_active_2row,ru_day_1row,zh_active_2row,zh_day_1row}.png`. The `de_*` cases translate real source payloads with the shipped German table. Requires
+  Outputs `tests/preview/out/{active_2row,hint_2row,hint_open,trap_1row,optional_3row,tip_2row,wet_4row,sanity_2row,heal_2row,emergency_2row,active_1row,won,done,collapsed,de_active_2row,de_hint_open,de_optional_3row,de_day_1row,de_done,ru_active_2row,ru_day_1row,zh_active_2row,zh_day_1row}.png`. The `de_*` cases translate real source payloads with the shipped German table. Requires
   Pillow (`pip install pillow`). The `de_*`/`ru_*`/`zh_*` cases translate real source
   payloads with the shipped tables; the renderer loads DST's fallback outline fonts
   (including packed BMFont channel decoding) so Cyrillic and CJK are visible, though

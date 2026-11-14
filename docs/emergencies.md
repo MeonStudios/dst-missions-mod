@@ -1,8 +1,9 @@
 # Emergency missions
 
 Emergency missions are **pop-up guidance cards** that replace the active mission card
-when a player's stat crosses a critical threshold, and disappear when the stat recovers.
-They live in [`scripts/guidedmissions/emergencies.lua`](../scripts/guidedmissions/emergencies.lua),
+when a player's stat crosses a critical threshold or a hound wave begins, and disappear
+when the danger has passed. They live in
+[`scripts/guidedmissions/emergencies.lua`](../scripts/guidedmissions/emergencies.lua),
 separate from the ordered chain in `missions.lua`.
 
 They are informational only. Showing or resolving an emergency never spawns items,
@@ -13,9 +14,10 @@ grants rewards, or changes a stat — it only swaps what the tracker displays.
 - **Pause & resume.** While an emergency is showing, the chain mission and its exact
   progress are suspended. When the emergency resolves, the chain card returns with the
   same counters and the same chain position. The chain does not advance.
-- **The goal row shows the way out.** The card's one required row is a live
+- **The goal row shows the way out.** A stat emergency's one required row is a live
   `reach_stat` row ("Get back to 75% health") that mirrors the current percentage and
-  checks when the resolve condition is met.
+  checks when the resolve condition is met. A hound emergency has no required row: its
+  rows are optional guidance, because the wave ends on world state, not on progress.
 - **The chain is paused, not merely hidden.** Events during the emergency count toward
   the emergency's objectives, not the suspended chain objectives.
 - **Auto-resolve.** The card ends by itself when the `resolve` condition becomes true;
@@ -24,7 +26,9 @@ grants rewards, or changes a stat — it only swaps what the tracker displays.
   chain starts, after it is complete, during the 3-second completion hold, and while
   the recovered card holds. A dead/ghost player never triggers one.
 - **Stat events trigger immediately; the 1 Hz poll is the fallback** for silent changes
-  (loading a save, console commands, a stat that never fires an event).
+  (loading a save, console commands, a stat that never fires an event). A hound wave
+  also pops immediately on the per-player `houndwarning` event (the first bark); the
+  poll is the fallback when the player joins the warning late.
 
 ## Entry schema
 
@@ -37,7 +41,7 @@ grants rewards, or changes a stat — it only swaps what the tracker displays.
     hint = "Eat healing food...",             -- optional; "?" hover tooltip
     trigger = {
         kind = "stat",                        -- condition kind (extension point)
-        stat = "health",                      -- "health" | "sanity"
+        stat = "health",                      -- health/sanity/hunger/wetness/temperature
         threshold = "<50",                    -- fires while the stat is below 50%
     },
     resolve = {
@@ -65,8 +69,8 @@ grants rewards, or changes a stat — it only swaps what the tracker displays.
 | `resolved_subtext` | no | Replaces `subtext` on the 3-second recovered card. Defaults to `subtext`. |
 | `hint` | no | Same hover tooltip as a chain mission. Hidden on the recovered card. |
 | `trigger` | yes | Condition that starts the emergency. |
-| `resolve` | yes | Condition that ends it. Must use the same `stat` as `trigger`. |
-| `objectives` | yes | Exactly one required `reach_stat` goal row matching `resolve`, plus any number of **optional** guidance rows. |
+| `resolve` | yes | Condition that ends it. Must use the same `kind` as `trigger`; for `kind = "stat"` it must also use the same `stat`. |
+| `objectives` | yes | A `kind = "stat"` emergency needs exactly one required `reach_stat` goal row matching `resolve`, plus any number of **optional** guidance rows. A `kind = "hounds"` emergency has **only optional** rows. |
 
 `title`, `subtext`, `resolved_subtext`, `hint`, and every `label` are **translation
 keys**. Author them in English, keep them single-line, and stay within the card's width
@@ -77,12 +81,16 @@ After editing text, run `lua tools/gen_l10n.lua` and translate the new keys; see
 
 ## Conditions and thresholds
 
-A condition is `{ kind, stat, threshold }`. `kind = "stat"` is the only kind today;
-`stat` is `"health"` or `"sanity"`. The manager never interprets conditions itself, so
-new kinds can be added in `emergencies.lua` without touching it.
+The manager never interprets conditions itself, so new kinds can be added in
+`emergencies.lua` without touching it. Two kinds exist today.
 
-`threshold` is a **string** so the comparison is explicit, and the value is a percentage
-of the stat's maximum (0-100):
+### `stat` conditions
+
+A stat condition is `{ kind = "stat", stat, threshold }`; `stat` is `"health"`,
+`"sanity"`, `"hunger"`, `"wetness"` or `"temperature"`.
+
+`threshold` is a **string** so the comparison is explicit. Health, sanity, hunger and
+wetness use a percentage of the stat's maximum (0-100):
 
 | Threshold | True when |
 |---|---|
@@ -91,16 +99,65 @@ of the stat's maximum (0-100):
 | `">50"` | above 50% |
 | `">=75"` | 75% or above |
 
-Whitespace around the operator/number is allowed; decimals are allowed. A malformed
-threshold, a missing stat component, or an unknown kind is simply `false` — it never
-errors and never triggers. For emergencies, `trigger` must use `<`/`<=` and `resolve`
-must use `>`/`>=`, and the resolve value must be at or above the trigger value. The gap
-is the hysteresis: the stat has to recover past the resolve line before the same
-emergency can fire again.
+**Temperature is the exception:** it is a raw degrees reading, so its thresholds are in
+degrees and may be negative — `"<0"` is freezing, `">70"` is overheating (DST's default
+overheat line). Whitespace around the operator/number is allowed; decimals are allowed.
+A malformed threshold, an out-of-range value, a missing stat component, or an unknown
+kind is simply `false` — it never errors and never triggers.
 
-Health is read as `currenthealth / maxhealth`; sanity as `current / max`. Sanity's
+`trigger` and `resolve` must use **opposite** comparisons, with the resolve line on the
+safe side of the trigger, so the stat has to recover past it before the same emergency
+can fire again:
+
+- health, sanity, hunger and freezing go low → high (`trigger "<50"`, `resolve ">=75"`);
+- wetness and overheating go high → low (`trigger ">50"`, `resolve "<=20"`).
+
+Health is read as `currenthealth / maxhealth`; sanity, hunger and wetness as
+`current / max` (wetness comes from the `moisture` component's
+`moisture / maxmoisture`); temperature as `temperature.current` in degrees. Sanity's
 `GetPercent()` is deliberately not used because induced insanity/lunacy forces it to
 0 or 1, which would hide a real drop.
+
+Hunger pushes `hungerdelta` from its 1 Hz decay task, and temperature crossing events
+(`startfreezing`, `startoverheating`, and their `stop` counterparts) are listened for,
+so those emergencies react immediately; the poll is the fallback for loads and console
+changes. The moisture and temperature components push `*delta` every frame, so those
+streams are **not** forwarded; wetness and custom temperature thresholds are evaluated
+by the 1 Hz poll (at most one second late).
+
+### `hounds` conditions
+
+A hound-wave condition is `{ kind = "hounds", state }`, where `state` is one of:
+
+| State | True when |
+|---|---|
+| `"warning"` | the shard's `hounded` component is in its pre-attack warning — the bark `ANNOUNCE_HOUNDS` answers |
+| `"attacking"` | the wave is spawning hounds |
+| `"nearby"` | at least one living, non-pet hound stands within 60 units of the player |
+| `"clear"` | not warning, not spawning, and no living wave hound nearby |
+
+The shipped `emergency_hound_wave` entry triggers on `"warning"` (the first bark, with
+the 1 Hz poll as the fallback for a late join) and resolves on `"clear"`. `trigger` must
+not use `"clear"`, which would fire when nothing is happening. The state reads
+`TheWorld.components.hounded` and a `TheSim:FindEntities` scan; `pet_hound` (MacTusk's
+hounds) is excluded, and hounds are matched by the vanilla `hound` tag, so ice/fire
+variants and the `warglet` upgrade count. See [`dst-api.md`](dst-api.md), "Hound waves".
+
+The warning flag is **shard-wide**, while vanilla targets only land players. A player on
+a boat therefore also sees the card even though the wave will not spawn hounds for them;
+the card clears on the normal resolve condition. This is a deliberate simplification
+that avoids duplicating vanilla's arena/water location checks.
+
+To test it in game without waiting for a natural wave, run this in the server console:
+
+```lua
+TheWorld:PushEvent("hounded_forceplannewattack", { multtimetoattack = 0.01 })
+```
+
+The intro warning lasts 120 s, so scaling the 5-8 day delay down to well under 120 s
+puts the shard straight into the warning on the next tick. Do **not** use
+`hounded:ForceNextWave()` for this: it sets the attack time to 0 and skips the warning,
+so no card appears.
 
 When several entries match at once, the first one in file order wins.
 
@@ -109,16 +166,20 @@ When several entries match at once, the first one in file order wins.
 Emergency objectives use exactly the same schema as chain objectives (see
 [`objectives.md`](objectives.md)) and are tracked on the card like any other row.
 
-- **Exactly one required row** must be a `reach_stat` objective whose `stat` and
-  `threshold` match the emergency's `resolve` condition. It renders first, with a live
-  percentage counter (`40/75%`), and shows a check once the resolve condition is met.
-  The test harness enforces the match, so the card cannot promise a different threshold
-  from the one that ends the emergency.
+- **Stat emergencies** have exactly one required row: a `reach_stat` objective whose
+  `stat` and `threshold` match the emergency's `resolve` condition. It renders first,
+  with a live percentage counter (`40/75%`), and shows a check once the resolve condition
+  is met. The test harness enforces the match, so the card cannot promise a different
+  threshold from the one that ends the emergency.
+- **Hound emergencies** have no required row. Their rows are optional guidance (for
+  example "Defend yourself" or "Equip a spear"), because the card ends on world state
+  rather than progress. The harness rejects a required row on a non-stat emergency.
 - **Every other row is optional** (`optional = true`) and renders under the `Optional`
   heading as guidance.
-- **Completion is still stat-driven.** The manager refuses to complete an emergency
-  through `CheckCompletion`; the required row and the resolve condition are evaluated
-  from the same live stat, and the emergency ends when `resolve` is true.
+- **The chain is never advanced by an emergency.** The manager refuses to complete an
+  emergency through `CheckCompletion`; a stat emergency's required row and resolve
+  condition are evaluated from the same live stat, and the emergency ends when
+  `resolve` is true.
 
 ## Repeat frequency
 
@@ -135,22 +196,32 @@ The tracking is always **per player**, because every player progresses independe
 "once per server" is not a group-wide one-shot. The option is server-side and read when
 the mod loads, so changing it needs a restart or a mod disable/enable.
 
+An entry is remembered only once it has been **seen through**: the recovered ("won")
+card is what marks it as fired. A card that is interrupted before it resolves — an
+admin jump, a save/load, the player leaving — is not remembered, so the same emergency
+can fire again. `always` remembers nothing at all.
+
 `c_setmission(...)` keeps the fired set; `c_resetmissions()` clears it so an admin can
 test an emergency again.
 
 ## Saving
 
-Only the chain is saved. If a player saves while an emergency is showing (or while the
-recovered card holds), the save stores the suspended chain mission and its progress;
-loading resumes the chain exactly where it was. The emergency itself is never restored,
-so a `session`-mode trigger is re-armed by the load, and a `server`-mode trigger is
-suppressed because its id was saved with the player.
+Only the chain is saved. If a player saves while an emergency is showing, the save
+stores the suspended chain mission and its progress; loading resumes the chain exactly
+where it was. The emergency itself is never restored. Whether the entry is re-armed
+depends on when the save happened: an active card was never won, so at that point no id
+has been recorded and the emergency can fire again after the load (`server` mode
+included). A save during the 3-second recovered hold does record the id, because the
+card had already resolved.
 
 ## Adding a condition kind
 
 1. Add the kind to `Emergencies.VALID_KINDS` and handle it in `ConditionMet` in
-   `emergencies.lua` (it currently reads stat fractions).
-2. Add any new `stat`/identifier to the validation in `tests/manager_test.lua`.
-3. Document it here.
+   `emergencies.lua` (it currently reads stat fractions and hound-wave state).
+2. Export any new state/value set (like `VALID_HOUND_STATES`) and validate it in
+   `tests/manager_test.lua`, including the trigger/resolve restrictions.
+3. Document it here and add the engine facts to [`dst-api.md`](dst-api.md).
 
-The manager needs no changes: it asks the module `IsTriggered` / `IsResolved`.
+The manager needs no changes: it asks the module `IsTriggered` / `IsResolved`. An
+event-driven kind can optionally add a listener in `manager.lua` that calls
+`CheckEmergencies()` for an immediate pop; the 1 Hz poll remains the fallback.

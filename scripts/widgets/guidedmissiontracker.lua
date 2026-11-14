@@ -30,13 +30,14 @@ local UI_ATLAS = "images/ui.xml"
 local HINT_ATLAS = "images/skilltree.xml"
 
 -- Icon ids that use a static UI texture instead of an inventory image.
--- `brain` and `heart` are the ids the sanity and heal objectives use; the
--- textures are the brain and heart glyphs from the HUD status badges.
+-- `brain`, `heart` and `hunger` are the ids the stat rows use; the textures are
+-- the brain, heart and stomach glyphs from the HUD status badges.
 -- `images/global_redux.xml` is preloaded by the global prefab
 -- (`scripts/prefabs/global.lua:456`), so no Assets entry is needed.
 local ICON_IMAGES = {
     brain = { "images/global_redux.xml", "status_sanity.tex" },
     heart = { "images/global_redux.xml", "status_health.tex" },
+    hunger = { "images/global_redux.xml", "status_hunger.tex" },
 }
 
 -- Icon ids drawn from a vanilla world animation. `flower` is a world plant
@@ -44,8 +45,20 @@ local ICON_IMAGES = {
 -- the anim shows the same flower art the world uses (bank/build "flowers",
 -- animations f1..f10, `prefabs/flower.lua:145-147`). modmain declares the anim
 -- asset so the client has it loaded.
+--
+-- `evergreen_normal` is the normal tree (a world entity, so no inventory art).
+-- The tree prefab splits bank from build: bank "evergreen_short" (animations
+-- idle/idle_chop/sway per stage, in `anim/evergreen_short_normal.zip`) with
+-- build "evergreen_new" (`anim/evergreen_new.zip`), animation "idle_normal"
+-- for the `normal` stage (`prefabs/evergreens.lua:53-66, 105-119, 990`).
+-- modmain declares both files. See docs/dst-api.md, "HUD icon art".
 local ICON_ANIMS = {
     flower = { bank = "flowers", build = "flowers", animation = "f1" },
+    evergreen_normal = {
+        bank = "evergreen_short",
+        build = "evergreen_new",
+        animation = "idle_normal",
+    },
 }
 
 local CARD_W = 320
@@ -107,9 +120,11 @@ local CARD_BASE_H = TOP_SAFE + TITLE_H + TITLE_GAP + ROWS_GAP
     + DIVIDER_H + DIVIDER_GAP + SUBTEXT_H + BOTTOM_SAFE
 
 local ICON_SIZE = 36
-local ICON_GAP = 8        -- icon -> counter
+local ICON_GAP = 8        -- icon column -> counter column
 local CHEVRON_SIZE = 34
 local CHECK_SIZE = 24
+local LABEL_ICON_GAP = 8  -- label -> icon column
+local LABEL_COUNTER_GAP = 10 -- label -> counter, on iconless rows
 
 -- The optional hint button. `question.tex` / `question_over.tex` are the
 -- skill-tree's question emblem ("images/skilltree.xml", used at
@@ -135,9 +150,13 @@ local STING_EVENT = "wilson_rework/ui/skill_mastered"
 local STING_VOLUME = 0.6
 
 -- Column geometry. Labels always start at the content edge (in line with the
--- title/subtext); the item icon is placed immediately left of the counter,
--- whose width is measured at runtime:
---   Collect flint            [icon] 0/3
+-- title/subtext). Counters hug the right content edge; each group (required
+-- rows, then the Optional group) gets an icon column placed left of the widest
+-- counter that group can ever render (see MaxCounter and BuildRows), so icons
+-- never move while values change width and a wide required counter does not
+-- push the optional icons left:
+--   Collect flint            [icon] 1/3
+--   Equip an Umbrella               [icon] 0/1
 local function MakeColumns(pad)
     local left = -CARD_W / 2 + pad
     local right = CARD_W / 2 - pad
@@ -150,6 +169,7 @@ local function MakeColumns(pad)
         left = left,
         right = right,
         chevron_x = chevron_x,
+        -- A done row draws its check where a counter of that width would end.
         check_x = right - CHECK_SIZE / 2,
         title_w = title_w,
         title_cx = left + title_w / 2,
@@ -792,6 +812,40 @@ function MissionTracker:AddRowIcon(prefab, x, y)
     return false
 end
 
+-- The widest counter text a row can ever render, used only to size the icon
+-- column. Measuring the *current* counter (the old behaviour) moved every icon
+-- whenever a value changed width: "80/10%" -> "10/10%", or "9/15" -> "15/15",
+-- which grows a digit. Values are bounded, so a stable upper bound is derived
+-- per row instead. Approximations are deliberate; the goal is a column that
+-- never needs to grow, not an exact maximum:
+--   * counts clamp at the target, so "<target>/<target>" is the widest ratio;
+--   * percentage stats run 0-100, so "100/<target>" is the widest;
+--   * temperature is raw degrees and can be negative: "-100/<target>";
+--   * the world day can outrun its target, so the current day is assumed to be
+--     at least two digits ("Day 99/3"); the target stays the row's real one.
+-- Digit glyphs have different advances ('0' is the widest), so every digit is
+-- replaced with '0' before measuring.
+function MissionTracker:MaxCounter(row)
+    local text
+    if row.counter_kind == "day" then
+        local target = row.counter_target or 0
+        text = L10n.Lfmt(Strings.DAY_COUNTER_FMT, math.max(target, 99), target)
+    else
+        local counter = row.counter or ""
+        local target = string.match(counter, "/([^/]*)$")
+        if target == nil then
+            text = counter
+        elseif string.find(target, "%%") then
+            text = "100/" .. target
+        elseif string.find(target, "°") then
+            text = "-100/" .. target
+        else
+            text = target .. "/" .. target
+        end
+    end
+    return (string.gsub(text, "%d", "0"))
+end
+
 function MissionTracker:BuildRows(rows)
     for _, widget in ipairs(self.row_widgets) do
         widget:Kill()
@@ -804,11 +858,34 @@ function MissionTracker:BuildRows(rows)
     local y_cursor = top - TOP_SAFE - TITLE_H - TITLE_GAP
     local optional_header_drawn = false
 
-    -- Pass 1: the counter, or the check that replaces it. The icon column is
-    -- sized from the widest counter so the icons line up down the card instead
-    -- of hugging each row's own counter ("0/3" is narrower than "0/15").
+    -- Size each group's icon column from the widest counter that group's rows
+    -- can ever show (see MaxCounter), not from the values on screen now. The
+    -- groups are separate columns so a wide required counter (a percentage)
+    -- does not push the optional icons left. A throwaway text widget does the
+    -- measuring; it is killed before this frame draws.
+    local probe = self.row_root:AddChild(Text(BODYTEXTFONT, 24, "", UICOLOURS.IVORY))
+    local required_column_w = CHECK_SIZE
+    local optional_column_w = CHECK_SIZE
+    for _, row in ipairs(rows) do
+        probe:SetString(self:MaxCounter(row))
+        probe:ResetRegionSize() -- measure the string, not a previously set region
+        local width = probe:GetRegionSize() or 0
+        if row.optional then
+            optional_column_w = math.max(optional_column_w, width)
+        else
+            required_column_w = math.max(required_column_w, width)
+        end
+    end
+    probe:Kill()
+    local function IconX(column_w)
+        return COLUMNS.right - column_w - ICON_GAP - ICON_SIZE / 2
+    end
+    local icon_x_required = IconX(required_column_w)
+    local icon_x_optional = IconX(optional_column_w)
+
+    -- Pass 1: the counter, or the check that replaces it. Counters hug the
+    -- right content edge.
     local plans = {}
-    local counter_column_w = CHECK_SIZE
     for _, row in ipairs(rows) do
         if row.optional and not optional_header_drawn then
             optional_header_drawn = true
@@ -842,29 +919,32 @@ function MissionTracker:BuildRows(rows)
             local counter = self.row_root:AddChild(
                 Text(BODYTEXTFONT, 24, self:FormatCounter(row), counter_colour))
             counter:SetVAlign(ANCHOR_MIDDLE)
-            counter_w = counter:GetRegionSize()
+            -- An empty counter string measures nil in the engine; rows should
+            -- always carry a counter, but a malformed objective can still
+            -- produce "". Keep the stray text aligned rather than throwing.
+            counter_w = counter:GetRegionSize() or 0
             counter:SetPosition(COLUMNS.right - counter_w / 2, y)
             counter:SetClickable(false)
             self.row_widgets[#self.row_widgets + 1] = counter
         end
 
-        counter_column_w = math.max(counter_column_w, counter_w)
         plans[#plans + 1] = { row = row, y = y, counter_w = counter_w }
     end
 
-    local icon_x = COLUMNS.right - counter_column_w - ICON_GAP - ICON_SIZE / 2
-
-    -- Pass 2: icons and labels. Labels always start at the content edge; an
-    -- icon only takes space from the right of the label, just before the
-    -- counter column. Optional rows are dimmed rather than prefixed: the
-    -- "Optional" heading above the group carries the meaning.
+    -- Pass 2: icons and labels. Labels always start at the content edge. Each
+    -- row's icon sits in its own group's column, left of the widest possible
+    -- counter, so it stays put while values change. Optional rows are dimmed
+    -- rather than prefixed: the "Optional" heading above the group carries the
+    -- meaning.
     for _, plan in ipairs(plans) do
         local row, y, counter_w = plan.row, plan.y, plan.counter_w
+        local icon_x = row.optional and icon_x_optional or icon_x_required
         local has_icon = self:AddRowIcon(row.prefab, icon_x, y)
 
         local label_left = COLUMNS.left
-        local label_right = has_icon and (icon_x - ICON_SIZE / 2 - 8)
-            or (COLUMNS.right - counter_w - 10)
+        local label_right = has_icon
+            and (icon_x - ICON_SIZE / 2 - LABEL_ICON_GAP)
+            or (COLUMNS.right - counter_w - LABEL_COUNTER_GAP)
         local label_w = label_right - label_left
         local colour = row.done and UICOLOURS.IVORY_70
             or (row.optional and UICOLOURS.GOLD_UNIMPORTANT or UICOLOURS.IVORY)

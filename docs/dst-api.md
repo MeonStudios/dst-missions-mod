@@ -36,6 +36,10 @@ processes, takes minutes, and is the slowest way to answer anything.
 | Why an undeclared global errored | `scripts/strict.lua` |
 | `AddPlayerPostInit`, `AddPrefabPostInit`, `GetModConfigData` | `scripts/modutil.lua` |
 | Player event sources | `scripts/components/inventory.lua`, `builder.lua`, `combat.lua` |
+| Hound waves and the bark warning | `scripts/components/hounded.lua` (read `GetWarning`/`GetAttacking`), `scripts/prefabs/hound.lua` (the `hound` tag) |
+| Equipment slots and equip events | `scripts/components/inventory.lua` (`equipslots`, `equip`/`unequip`), `equippable.lua`, `weapon.lua`, `tool.lua`, `armor.lua` |
+| Hunger stat and `hungerdelta` | `scripts/components/hunger.lua` |
+| Wetness (moisture) and temperature | `scripts/components/moisture.lua`, `scripts/components/temperature.lua` |
 | Finding entities near a player | `scripts/components/combat.lua` (`TheSim:FindEntities` usage) |
 | Farming / planting seeds | `scripts/components/farmplantable.lua`, `scripts/actions.lua` (`PLANTSOIL`), `scripts/componentactions.lua` |
 | Fertilizing a bush/grass | `scripts/actions.lua` (`ACTIONS.FERTILIZE.fn`), `scripts/components/pickable.lua`, `scripts/components/fertilizer.lua`, `scripts/componentactions.lua` |
@@ -242,9 +246,20 @@ documented and version-dependent.
     Be aware `Sanity:LongUpdate` calls `DoDelta(self.rate * dt, true)` every tick
     (`components/sanity.lua:609`), so positive auras/rates push continuous small
     `sanitydelta` events, including at full sanity.
+  - `hungerdelta` → `{ oldpercent, newpercent, overtime, delta }`, pushed on the
+    entity by `Hunger:SetCurrent` (`components/hunger.lua:105-113`). Unlike
+    health's `amount`, `delta` is the **clamped actual change** (`current - old`), so
+    it is already the points that fit. The hunger component runs a 1 s decay task
+    (`UPDATE_PERIOD = 1`, `OnTaskTick` → `DoDec` → `DoDelta`), so `hungerdelta` fires
+    continuously while the player burns hunger. `DoDelta` no-ops while invincible or
+    teleporting (`:128-143`), and console/load paths can set hunger directly, so keep
+    a poll fallback. `startstarving` / `stopstarving` are separate events pushed when
+    `current` crosses 0 (`:115-124`).
   - **Threshold reads:** read the raw component fields, never `GetPercent()`:
-    `health.currenthealth / health.maxhealth` and `sanity.current / sanity.max` (all
-    plain numbers). `Health:IsDead()` is `currenthealth <= 0`
+    `health.currenthealth / health.maxhealth`, `sanity.current / sanity.max`,
+    `hunger.current / hunger.max`, `moisture.moisture / moisture.maxmoisture`, and
+    `temperature.current` (a raw degree reading, not a percentage). All are plain
+    numbers. `Health:IsDead()` is `currenthealth <= 0`
     (`components/health.lua:546-548`); use it to skip dead/ghost players.
     `Health:SetPercent(percent)` is `components/health.lua:550-553` and
     `Sanity:SetPercent(percent)` is `components/sanity.lua:302-306`. The debug commands
@@ -270,6 +285,83 @@ documented and version-dependent.
     same as for chopping.
 - `playeractivated` is pushed to `TheWorld` in `prefabs/player_common.lua` (~line 826),
   after `ActivateHUD` has already run `hud:SetMainCharacter(inst)`.
+
+## Equipment
+
+Verified 2026-11-14 against `components/inventory.lua`, `equippable.lua`,
+`weapon.lua`, `tool.lua`, `armor.lua`, and `constants.lua`.
+
+- **`equip` / `unequip` are pushed on the owning player**, not on the item.
+  `Inventory:Equip` pushes `equip` with `{ item, eslot, no_animation }` after
+  `self.equipslots[eslot] = item` (`components/inventory.lua:1266-1381`; event at
+  `:1377`), so a handler already sees the new item in `equipslots`.
+  `Inventory:Unequip` clears the slot and then pushes `unequip` with
+  `{ item, eslot, slip }` (`:1219-1245`; event at `:1241`); it pushes even when the slot
+  was empty (`item` nil). The item itself also pushes `equipped` / `unequipped` on the
+  **item** with `{ owner }` (`components/equippable.lua:102,122`) — do not listen for
+  those on the player.
+- **`inventory.equipslots`** is a plain public table keyed by `EQUIPSLOTS`
+  (`components/inventory.lua:49`). `EQUIPSLOTS` contains only `HANDS`, `HEAD`, `BODY`
+  and `BEARD` (`constants.lua:654-660`), and `Inventory:GetEquippedItem(eslot)` is the
+  accessor (`:773-775`). Amulets, backpacks, body armour and many costumes all use
+  `BODY`; the `BEARD` slot is used by `beard_sack` (`prefabs/beard_sack.lua:44`).
+- **Weapon/tool/armour classification.** `weapon` is a tag added by
+  `components/weapon.lua:29` (and explicitly by some prefabs, e.g.
+  `prefabs/axe.lua:85`); `tool` is a tag added by `components/tool.lua:18`;
+  `ITEMTAG.WEAPON` / `ITEMTAG.TOOL` are those strings (`constants.lua:666-667`).
+  **There is no `armor` tag**: armour is any item with an `armor` component
+  (`components/armor.lua`), regardless of slot. Items can be both weapon and tool (axe,
+  pickaxe, bugnet), so category tests are trait tests, not exclusive classes.
+- **An equip pushes `equip`, but none of the four inventory-gain events**
+  (`itemget`/`gotnewitem`/`newactiveitem`/`setoverflow`); only a body container
+  additionally pushes `setoverflow` (`components/inventory.lua:1370`). A live equipment
+  row therefore listens for `equip`/`unequip` and also refreshes on the 1 Hz poll.
+- This mod reads all of this in `objectives.lua` (`HasEquipped` / `LiveProgress`) for the
+  `equip` objective type.
+
+## Wetness and temperature
+
+Verified 2026-11-14 against `components/moisture.lua` and
+`components/temperature.lua` (build 761239).
+
+### Wetness
+
+- The component is **`moisture`**; "wetness" is the player-facing meter. Fields:
+  `moisture` (0-100) and `maxmoisture` (100), plus `Moisture:GetMoisturePercent()`
+  (`:171-173`), `GetMoisture()` (`:167-169`) and `GetMaxMoisture()` (`:163-165`).
+- **`moisturedelta`** → `{ old, new }`, pushed by `DoDelta` (`:132-147`) and by
+  `SetMoistureLevel` (`:149-155`, where `old` is set equal to `new`). The
+  component's `OnUpdate` runs every frame and calls `DoDelta` every frame
+  (`:338-372`), so the event fires continuously. **Do not forward it to
+  per-frame logic**; read the field on a poll.
+- `Moisture:IsWet()` (`:159-161`) returns `self.wet`, which is
+  `GetSegs() >= 2` of `numSegs = 5` (about 40%), set in `DoDelta`/`SetMoistureLevel`
+  (`:132-155`). The character announces damp/wet/wetter/soaked at segment
+  crossings (`AnnounceMoisture`, `:118-130`); there is no "became wet" event.
+- Console: `c_setmoisture(n)` takes a **fraction** (0-1) and calls `SetPercent`
+  (`consolecommands.lua:454-460`), so `c_setmoisture(0.6)` = 60%.
+
+### Temperature
+
+- Fields: `current` (raw degrees), `mintemp`/`maxtemp` (defaults
+  `TUNING.MIN_ENTITY_TEMP = -20`, `MAX_ENTITY_TEMP = 90`), `overheattemp`
+  (`TUNING.OVERHEAT_TEMP = 70`) and the starting value
+  `TUNING.STARTING_TEMP = 35` (`temperature.lua:27-30`, `tuning.lua:2300-2305`).
+- `Temperature:IsFreezing()` is `current < 0` (`:190-192`); `IsOverheating()` is
+  `current > overheattemp` (`:194-196`). `SetTemperature` clamps to the range and
+  pushes the crossing events **once** when the predicate flips:
+  `startfreezing`/`stopfreezing` and `startoverheating`/`stopoverheating`
+  (`:166-184`).
+- **`temperaturedelta`** → `{ last, new, hasrate }` is pushed by every
+  `SetTemperature` call (`:166-184`), and `OnUpdate` calls it **every frame**
+  (`:311-520`). Like `moisturedelta`, do not forward this stream; use the poll.
+  The four crossing events above are cheap and safe to listen to.
+- Console: `c_settemperature(n)` takes raw **degrees** (`consolecommands.lua:462-470`);
+  `c_settemperature(80)` overheats and `c_settemperature(-5)` freezes.
+- This mod reads both in `conditions.lua` (`GetStatValue`): wetness as a 0-100
+  percentage (`moisture / maxmoisture`) and temperature as raw degrees. Both are
+  refreshed on the 1 Hz poll; the stock freezing/overheating emergencies also
+  listen for the four crossing events so they pop at the exact moment.
 
 ## Cooking and food
 
@@ -596,6 +688,49 @@ documented and version-dependent.
   where `time` is the fraction of the current day.
 - Use `cycles + 1` for "reach day N" objectives.
 
+## Hound waves
+
+Verified 2026-11-14 against `scripts/components/hounded.lua` and
+`scripts/prefabs/hound.lua` (build 761239).
+
+- `hounded` is a **world** component on both shards (`prefabs/forest.lua:643`,
+  `prefabs/cave.lua:553`) and asserts it is server-only at the top of the file, so it is
+  readable from any server-side player component via `TheWorld.components.hounded`.
+- **Warning window.** `Hounded:GetWarning()` (`components/hounded.lua:740-742`) returns the
+  internal `_warning` flag, which flips true when `_timetoattack < _warnduration`
+  (`:1088-1090` in the main update, `:1023-1024` in the per-player delayed path). Warning
+  durations depend on the escalation level: intro 120 s, light 60, med 45, heavy 30,
+  crazy 30 (`_spawndata.attack_levels`, `:46-52`). A 1 Hz poll therefore always sees the
+  warning.
+- **Spawn phase.** `Hounded:GetAttacking()` (`:744-746`) is
+  `(_timetoattack <= 0) and _attackplanned`: true while the wave is spawning hounds, false
+  once the spawn queue drains and the fight is underway. Hounds spawn 30 units from the
+  target (`SPAWN_DIST`, `:21`; `GetSpawnPoint`/`FindWalkableOffset`) and are immediately
+  pointed at that player (`ReleaseSpawn` calls `combat:SuggestTarget`, `:460-469`).
+- **The bark event is `houndwarning`, pushed on each targeted player**, with a
+  `HOUNDWARNINGTYPE` value (`DoWarningSound`, `:891-905`; values in `constants.lua:2462-2472`:
+  `LVL1..4`, `LVL1_WORM..LVL4_WORM`, `WORM_BOSS`). Only land players receive it:
+  `_targetableplayers[GUID] == "land"` (`CheckForLocationImmunity`, `:624-640` classifies
+  water/arena/vault targets differently), and a target that joins mid-warning gets it
+  through `DoDelayedWarningSound` (`:917-925`). It is a per-player event, not a world event.
+- **The character speech is NOT the first notice.** `_DoWarningSpeech` (`:840-872`) calls
+  `player.components.talker:Say(GetString(player, "ANNOUNCE_HOUNDS"))`, but the main update
+  only calls it after `_announcewarningsoundinterval` (starts at 4) warning-sound ticks
+  (`:1093-1114`), so it lags the first bark by roughly 10-30 s. Use `houndwarning` for
+  "the character just noticed the hounds".
+- **There is no wave-over event or wave id.** Wave hounds are ordinary prefabs, and every
+  variant (base, ice, fire, the `warglet` upgrade spawn) carries the `hound` tag
+  (`prefabs/hound.lua:480`, `prefabs/warglet.lua:256`). MacTusk's hounds add `pet_hound`
+  (`prefabs/walrus_camp.lua:236`) and are not part of a wave; exclude them from any
+  living-hound scan. Derive "wave over" from
+  `not GetWarning() and not GetAttacking()` plus a `TheSim:FindEntities` scan for
+  `{"hound"}` around the player.
+- This mod uses these facts in `emergencies.lua` (`kind = "hounds"`): trigger on
+  `state = "warning"` (first bark, or the poll's next tick) and resolve on
+  `state = "clear"` (no warning/spawn and no living non-pet hound within 60 units).
+  The `houndwarning` listener in `manager.lua` only makes the pop immediate; the condition
+  itself reads world state.
+
 ## Netvars
 
 - Constructors: `net_string(guid, name)` or `net_string(guid, name, dirty_event_name)`;
@@ -640,6 +775,18 @@ documented and version-dependent.
   so a backing sized from it was too short). When you control the wrapping with
   `SetMultilineTruncatedString`, use its **return value (the line count)** times a
   one-line height instead.
+  **An empty string measures `nil`, not 0** (observed in-game 2026-11-14): a row whose
+  counter text was `""` made `GetRegionSize()` return nil, and the `math.max` that
+  collected the widest counter threw. That aborted the row-build pass midway, leaving
+  the counters of earlier rows on screen with no labels or icons. Guard every measured
+  width with `or 0`.
+- **Glyph advances vary per character.** In `stint-ucr50` (BODYTEXTFONT) at size 24 the
+  advances are: `0` 7.68 px (the widest digit); `2`,`3`,`5` 6.72; `4`,`6`,`8`,`9` 7.2;
+  `7` 6.24; `1`,`/`,`-`,`°` 5.28; `%` 9.6. (Measured 2026-11-14 from
+  `fonts/stint-ucr50.zip` inside `fonts.zip`.) A text measurement therefore depends on
+  *which* digits are showing, which is why measuring a live counter makes neighbouring
+  icons jitter as it changes (`80/10%` vs `10/10%`). To build a stable width estimate,
+  synthesize the widest string and normalize every digit to `0`.
 - **Hover text is a `Widget` method, not a separate widget.** `Widget:SetHoverText(text,
   params)` (`widgets/widget.lua:708`) lazily builds a `hovertext_root` with a
   `NEWFONT_OUTLINE` text at 22 (scaled 1.1×) over an `images/frontend.xml` /
@@ -858,15 +1005,29 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
   anchored the art's base.
   The offline preview cannot draw anims (`render.py` decodes KTEX atlases and BMFonts
   only), so anim icons are laid out but blank in `tests/preview/out`.
+- **Tree art is bank/build split** (verified 2026-11-14 from the game data). A normal
+  evergreen (`prefab = "evergreen_normal"`) is not one anim file: the prefixes are
+  `file="evergreen_new"` (build, `anim/evergreen_new.zip`, declared as
+  `Asset("ANIM", "anim/evergreen_new.zip")` — `prefabs/evergreens.lua:3-6, 53-66`) and
+  `file_bank="evergreen_short"` (animations `idle_short..old`, `sway*`, `chop*`,
+  `stump*`; bank file `anim/evergreen_short_normal.zip`
+  — `evergreens.lua:105-119, 851-853`). The `normal` stage's idle is `idle_normal`
+  (`makeanims` at `evergreens.lua:104-119`, stage set at `:990`). Read from
+  `anim.bin` inside `evergreen_short_normal.zip`: it contains
+  `idle_short`, `idle_normal`, `chop_normal`, `stump_normal`, ... and the bank name
+  `evergreen_short`. A UIAnim for a tree therefore needs **both** files declared, and
+  `SetBank("evergreen_short")` with `SetBuild("evergreen_new")`; the prefab id
+  `evergreen_normal` is neither.
 - **HUD status-badge art**: `images/global_redux.xml` (`prefabs/global.lua:456`) contains
   `status_sanity.tex`, `status_sanity_bad.tex`, `status_health.tex`,
   `status_health_bad.tex`, `status_hunger.tex` and `status_hunger_bad.tex` — the status
   badge glyphs, drawn on one 2048 atlas in the same UV grid (each element spans 0.062 of
   the atlas, i.e. 128x128, with a soft dark halo transparent outside it). Verified
   2026-11-12 from `images/global_redux.xml` inside `data/databundles/images.zip`. The
-  tracker maps the icon ids `brain` → `status_sanity.tex` and `heart` →
-  `status_health.tex` via a small override table; they are the default icons for
-  `sanity` and `heal` rows. Neither id is an inventory item.
+  tracker maps the icon ids `brain` → `status_sanity.tex`, `heart` → `status_health.tex`
+  and `hunger` → `status_hunger.tex` via a small override table; they are the default
+  icons for `sanity`/`heal` rows and for `reach_stat` rows by stat. None of the ids is an
+  inventory item.
   `images/scrapbook_icons1.xml` also has `icon_sanity.tex` (124x124 brain in an orange
   badge), unused by the tracker.
 - Icons for non-item rows (e.g. a "survive until day N" row) have no item texture. Vanilla
