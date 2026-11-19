@@ -83,6 +83,9 @@ local ITEM_ATLAS = {
     umbrella = "images/inventoryimages3.xml",
     strawhat = "images/inventoryimages3.xml",
     butterflywings = "images/inventoryimages1.xml",
+    campfire = "images/inventoryimages1.xml",
+    tent = "images/inventoryimages3.xml",
+    siestahut = "images/inventoryimages3.xml",
 }
 
 function GetInventoryItemAtlas(tex)
@@ -717,10 +720,25 @@ local CASES = {
         },
     },
     {
+        -- `cook` defaults to the campfire art and `sleep` to the tent (or the
+        -- filtered bed's own art); all are structure arts in the item atlases.
+        "cook_sleep_3row",
+        {
+            title = "Warm Meal",
+            subtext = "Fire makes it better.",
+            rows = table.concat({
+                ROW("Cook items", "campfire", "1/2"),
+                ROW("Sleep in a tent", "tent", "0/1", false, true),
+                ROW("Sleep in a siesta hut", "siestahut", "0/1", false, true),
+            }, ";"),
+            state = "active",
+        },
+    },
+    {
         "emergency_2row",
         {
             title = "Bleeding Out",
-            subtext = "Patch yourself up before something finishes the job.",
+            subtext = "Patch up before something finishes the job.",
             rows = table.concat({
                 ROW("Get back to 75% health", "heart", "40/75%"),
                 ROW("Eat a butterfly wing", "butterflywings", "0/1", false, true),

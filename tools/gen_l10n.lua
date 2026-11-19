@@ -47,6 +47,14 @@ end
 local function AddObjectives(where, objectives)
     for i, objective in ipairs(objectives or {}) do
         Add(where .. " objective " .. i .. " label", objective.label)
+        -- Character overrides carry their own label; both are translation keys.
+        -- `false` hides the row for that character, so it has no label.
+        for character, override in pairs(objective.overrides or {}) do
+            if type(override) == "table" then
+                Add(where .. " objective " .. i .. " override " .. tostring(character)
+                    .. " label", override.label)
+            end
+        end
     end
 end
 

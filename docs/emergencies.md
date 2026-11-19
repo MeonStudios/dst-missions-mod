@@ -186,11 +186,15 @@ Emergency objectives use exactly the same schema as chain objectives (see
 The `EMERGENCY_FREQUENCY` mod option (Mods → Configure → **Emergency Repeat**) controls
 how often each entry may fire for a player:
 
-| Mode | Fires | Survives a relog / world load | Re-armed by |
+| Mode | Fires | Survives | Re-armed by |
 |---|---|---|---|
-| `always` (Every time) | every time the trigger condition becomes true again after a resolve | — | the resolve condition |
-| `session` (Once per session, default) | once per player per session | no | rejoining / restarting the world |
-| `server` (Once per server) | once per player per world | yes (saved with the player) | regenerating the world, or `c_resetmissions()` |
+| `always` (Every time) | every time the trigger condition becomes true again after a resolve | nothing | the resolve condition |
+| `session` (Once per session, default) | once per player per session | a caves / shard trip (the set rides in the player save across the transfer) | rejoining / restarting the world |
+| `server` (Once per server) | once per player per world | any relog or world load (saved with the player) | regenerating the world, or `c_resetmissions()` |
+
+A shard transfer is not a new session: moving to the caves and back keeps the fired
+set. Only a fresh join or a world load re-arms `session` mode. (`server` mode keeps the
+set across those too.)
 
 The tracking is always **per player**, because every player progresses independently;
 "once per server" is not a group-wide one-shot. The option is server-side and read when
@@ -206,13 +210,17 @@ test an emergency again.
 
 ## Saving
 
-Only the chain is saved. If a player saves while an emergency is showing, the save
-stores the suspended chain mission and its progress; loading resumes the chain exactly
-where it was. The emergency itself is never restored. Whether the entry is re-armed
+The chain and (in `session`/`server` mode) the emergency fired set are saved. If a
+player saves while an emergency is showing, the save stores the suspended chain mission
+and its progress; loading resumes the chain exactly where it was. The emergency itself is never restored. Whether the entry is re-armed
 depends on when the save happened: an active card was never won, so at that point no id
 has been recorded and the emergency can fire again after the load (`server` mode
 included). A save during the 3-second recovered hold does record the id, because the
 card had already resolved.
+
+The fired set is also written to the save in `session` mode, so it can cross a shard
+transfer; `OnLoad` then decides whether to keep it. In `always` mode the set is never
+saved at all.
 
 ## Adding a condition kind
 

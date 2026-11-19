@@ -286,6 +286,46 @@ documented and version-dependent.
 - `playeractivated` is pushed to `TheWorld` in `prefabs/player_common.lua` (~line 826),
   after `ActivateHUD` has already run `hud:SetMainCharacter(inst)`.
 
+## Character restrictions (verified)
+
+Verified 2026-11-19 against the installed character prefabs; used to author
+character overrides (`docs/objectives.md`, "Character overrides"). The mod does
+not read these at runtime — mission data names the overrides by hand.
+
+- **A refused food pushes no `oneat` event.** `Eater:Eat` checks
+  `PrefersToEat(food)` first (`components/eater.lua:203`) and bails out before
+  the `oneat` push at `:270`; `PrefersToEat` (`:304-318`) requires the food to
+  match the eater's `preferseating` or `preferseatingtags`. An `eat` objective
+  for a food a character refuses can therefore never complete.
+- **Wigfrid** only swallows **MEAT** and **GOODIES**:
+  `prefabs/wathgrithr.lua:168`
+  (`eater:SetDiet({ FOODGROUP.OMNI }, { FOODTYPE.MEAT, FOODTYPE.GOODIES })`).
+  She gets the EAT action for anything but spits the rest out.
+- **Wurt** is vegetarian: `prefabs/wurt.lua:665`
+  (`SetDiet({ FOODGROUP.VEGETARIAN }, { FOODGROUP.VEGETARIAN })`).
+  `FOODGROUP.VEGETARIAN` is VEGGIE, SEEDS, GENERIC and GOODIES
+  (`constants.lua:2098-2108`) — no meat, no insects.
+- **Warly** only eats Crock Pot dishes: `prefabs/warly.lua:36-37`
+  (`SetPrefersEatingTag("preparedfood")`, `"pre-preparedfood"`), and
+  `prefabs/preparedfoods.lua:73` tags Crock Pot products. Raw and fire-cooked
+  ingredients are refused.
+- **Wormwood** eats anything but gains **no health from food**:
+  `prefabs/wormwood.lua:798-801` (`eater:SetAbsorptionModifiers(0, 1, 1)`).
+  Topical healing (Healing Salve) still works.
+- **Wickerbottom** cannot sleep: the `insomniac` tag
+  (`prefabs/wickerbottom.lua:31`), checked before the SLEEPIN action is offered
+  (`componentactions.lua:795`, `:1730`, `:2930`). `SleepingBag:DoSleep` never
+  runs for her, so a `sleep` row cannot complete.
+- Other characters in this build (Wilson, Willow, Wolfgang, Wendy, WX-78,
+  Woodie, Wes, Webber, Winona, Wortox, Walter, Wanda) have no food or sleep
+  restriction; Wortox just absorbs less from food
+  (`prefabs/wortox.lua:771`) and Webber can eat monster food.
+- Food types used by current content: butterfly wings, cooked green cap,
+  cooked cactus flesh, cooked berries and trail mix are VEGGIE
+  (`prefabs/butterflywings.lua:41`, `mushrooms.lua:407`, `cactus.lua:157`,
+  `preparedfoods.lua:415`); meatballs, perogies and fishsticks are MEAT
+  (`preparedfoods.lua:189, 215, 83`).
+
 ## Equipment
 
 Verified 2026-11-14 against `components/inventory.lua`, `equippable.lua`,
@@ -463,6 +503,14 @@ Verified 2026-11-14 against `components/moisture.lua` and
   `ondeploy` (`:19-40`) spawns the plant prefab directly and calls
   `Pickable:OnTransplant`. So replanting a dug plant goes through
   `Deployable:Deploy` and never reaches `FarmPlantable:Plant`.
+- **Berry bush ids:** the juicy bush is `berrybush_juicy`, not `berrybush2`
+  (`prefabs/berrybush.lua:369-371`; `createbush("berrybush2", "berrybush", ...)`
+  is a second **normal** bush with the same display name and harvest, while
+  `createbush("berrybush_juicy", ...)` uses `juicy_postinit`). Digging any bush
+  drops `dug_<id>` (the loot line at `prefabs/berrybush.lua:186`), and
+  `prefabs/plantables.lua:118-137` defines `dug_berrybush`, `dug_berrybush2`
+  and `dug_berrybush_juicy`; the last two reuse the `dug_berrybush` inspect
+  name. So a replant filter must list all three, not just `dug_berrybush`.
 - **`deployedplant` is vanilla's own "this deploy was a planting" tag.**
   `Deployable:Deploy` (`components/deployable.lua:132-147`) computes
   `isplant = self.inst:HasTag("deployedplant")`, spawns through `ondeploy`,
@@ -484,6 +532,29 @@ Verified 2026-11-14 against `components/moisture.lua` and
   (`farm_plant_carrot`) or the bush (`berrybush`). Because `deployitem` carries
   no tag and `itemplanted` carries no prefab, the mod's component wrapper is
   what ties the item id to "was this a planting".
+
+## Deployable items (verified)
+
+Verified 2026-11-19 against `components/deployable.lua` and
+`prefabs/farm_plow.lua`; used by the `deploy` objective.
+
+- **`Deployable:Deploy` pushes `deployitem` on the deployer** with
+  `{ prefab = <item prefab id> }` (`components/deployable.lua:132`, push at
+  `:142`). The push happens after `ondeploy` ran, and `ondeploy` may remove the
+  item (`farm_plow_item` does); `prefab` is a plain field, so reading it after
+  removal is safe.
+- **The Garden Digamajig is `farm_plow_item`** (`prefabs/farm_plow.lua`,
+  `item_fn`): a deployable with `DEPLOYMODE.CUSTOM`,
+  `_custom_candeploy_fn = can_plow_tile`, and an `ondeploy` that spawns the
+  `farm_plow` entity, spends one `finiteuses` charge and removes the item. The
+  placed `farm_plow` drills for `TUNING.FARM_PLOW_DRILLING_DURATION` and then
+  terraforms its tile to `WORLD_TILES.FARMING_SOIL`, returning the item via
+  `Finished`. The deploy is the player action; the soil appears later.
+- **`deployitem` is not a planting signal by itself:** a dug plant, a Wormwood
+  seed, a bird trap or a boat kit all push it. `itemplanted` (on TheWorld) is
+  the planting-side event, and only for `deployedplant`-tagged items.
+- Structures placed from the build menu do **not** go through `Deployable`:
+  they fire `buildstructure` on the builder instead.
 
 ## Fertilizing
 
@@ -524,12 +595,29 @@ Verified 2026-11-14 against `components/moisture.lua` and
   (`components/fertilizer.lua:33-49`) spends `finiteuses` or removes the stack.
   Reading `fertilizer.prefab` inside a `Fertilize` wrapper is therefore safe,
   but the item is gone by the time the action returns.
+- **Self-fertilizing (Wormwood) is the `fertilizable` branch.** The FERTILIZE
+  action offers itself on a fertilizer item when `doer:HasTag("self_fertilizable")`
+  and the doer can heal (`componentactions.lua:1248-1252` for the targeted form,
+  `:2712-2719` for the item form). `ACTIONS.FERTILIZE.fn` then calls
+  `doer.components.fertilizable:Fertilize(invobject)` (`actions.lua:1830-1832`);
+  `Fertilizable:Fertilize` (`components/fertilizable.lua`) invokes the
+  character's `onfertlizedfn`, which for Wormwood is `OnFertilized`
+  (`prefabs/wormwood.lua:529-544`, wired at `:845-846`). The item's nutrients
+  decide the heal: manure nutrients call `health:DoDelta(...)` immediately
+  (`:518-524`), compost nutrients add a heal-over-time debuff (`:511-516`), and
+  formula nutrients feed bloom (`:502-509`). Any fertilizer that carries
+  nutrients therefore heals him; the item is consumed afterwards by
+  `Fertilizer:OnApplied`, as in the plant branch.
 - **Consequence for this mod:** `modmain.lua` post-inits `pickable` and wraps
   `Fertilize`, pushing `guidedmissions_fertilized` with
   `{ plant = <the plant entity>, fertilizer = <fertilizer prefab id> }` to the
   doer. Only this branch is hooked, so fertilizing farm crops or old farm plots
   is deliberately not reported. Objective filters match `plant.prefab`
-  (`berrybush`, `grass`, `reeds`), not the fertilizer.
+  (`berrybush`, `grass`, `reeds`), not the fertilizer. A second wrapper on
+  `fertilizable` pushes `guidedmissions_self_fertilized` with
+  `{ fertilizer = <fertilizer prefab id> }` on the player, which backs
+  `fertilize` rows with `self = true`; the two events never cross-match. The
+  fertilizer heal also fires `healthdelta`, so a `heal` row credits it too.
 
 ## Traps
 
@@ -687,6 +775,31 @@ Verified 2026-11-14 against `components/moisture.lua` and
 - `TheWorld.components.worldstate:GetWorldAge()` returns `1 + cycles + time`, a float
   where `time` is the fraction of the current day.
 - Use `cycles + 1` for "reach day N" objectives.
+
+## Shard migration and player save/load (verified)
+
+Verified 2026-11-19 against the installed scripts; used by the emergency repeat
+tracker (`session` mode must not re-arm on a caves trip).
+
+- **A shard transfer serializes the player entity.** Its save record includes
+  every component's save data, so a component's `OnSave` runs on the source
+  shard and `OnLoad` runs on the destination shard. The manager's fired-emergency
+  set therefore has to ride in the save to survive a transfer.
+- **The save record marks a migration.** `player_common.lua:1217` writes
+  `data.migration = inst.migration`; `OnPreLoad` restores it
+  (`player_common.lua:1257`: `inst.migration = data ~= nil and data.migration or nil`).
+  On a fresh join or world load `data.migration` is nil, so `inst.migration` is
+  nil.
+- **`inst.migration` is already set when a component's `OnLoad` runs.**
+  `EntityScript:SetPersistData` (`entityscript.lua:1979`) calls
+  `inst:OnPreLoad(data)` at `:1988`, then each component's `OnLoad` at `:2005`,
+  then `inst:OnLoad` at `:2011`. A component can therefore test
+  `self.inst.migration ~= nil` to tell "this load is a shard migration" from
+  "this is a new session".
+- Nothing in `player_common.lua` clears `inst.migration` after arrival. If that
+  value is later written into an ordinary autosave, a fresh join would see a
+  non-nil migration too — the manager treats that as "still the same session",
+  which can only keep an emergency suppressed, never fire one twice.
 
 ## Hound waves
 
@@ -973,6 +1086,13 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
   exists **only** in `images/scrapbook_icons1.xml`, so it does **not** resolve through
   this helper. `researchlab` has no `prefabs/researchlab.lua` — the id is created in
   `prefabs/scienceprototyper.lua:299` — and follows the same default.
+- Verified 2026-11-19 from the `inventoryimages1-4.xml` atlases: structures and beds
+  have build-menu art under their prefab id, so they resolve through
+  `GetInventoryItemAtlas` like items. `campfire.tex` is in `inventoryimages1.xml`;
+  `firepit.tex` in `inventoryimages2.xml`; `tent.tex` and `siestahut.tex` in
+  `inventoryimages3.xml`; `bedroll_straw.tex` and the `bedroll_furry*` variants
+  (including the quilt skins) in `inventoryimages1.xml`. The tracker uses `campfire`
+  as the default icon for `cook` rows and `tent` for `sleep` rows.
 - **Scrapbook art** (verified 2026-11-08, not used by the tracker):
   `GetScrapbookIconAtlas(imagename)` probes `images/scrapbook_icons1..3.xml` with
   `TheSim:AtlasContains` (`simutil.lua:749-771`), and all three atlases are preloaded

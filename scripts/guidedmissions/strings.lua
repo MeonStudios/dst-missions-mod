@@ -15,7 +15,7 @@ Strings.OPTIONAL = "Optional"
 -- The terminal card once every mission is done.
 Strings.ALL_COMPLETE_TITLE = "All Missions Complete"
 Strings.ALL_COMPLETE_SUBTEXT = "You survived. For now."
-Strings.ALL_COMPLETE_CHAT = "All guided missions are complete!"
+Strings.ALL_COMPLETE_CHAT = "%s completed all missions!"
 
 -- Server chat/log composition. The player name and mission title are inserted by
 -- the manager; only the server translates these (clients never see them except

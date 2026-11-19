@@ -35,8 +35,9 @@ Supported objective types:
 | Type      | Fields            | Completes when |
 |-----------|-------------------|----------------|
 | `collect` | `prefab`, `count` | the player has held `count` of the prefab |
-| `craft`   | `prefab`, `count` | the player crafts `count` of an inventory item |
+| `craft`   | `prefab`, `count` | the player crafts `count` of an inventory item, or already carries them |
 | `build`   | `prefab`, `count` | the player builds `count` of a structure in the world |
+| `deploy`  | `count`, optional `prefab` | the player deploys `count` deployable items (Garden Digamajig, bird trap) |
 | `kill`    | `prefab`, `count` | the player kills `count` of the prefab |
 | `trap_catch` | `count`, optional `prefab` (creature filter) | the player checks `count` sprung traps that hold a catch |
 | `survive` | `day`             | the world reaches that day |
@@ -49,8 +50,8 @@ Supported objective types:
 | `equip`   | optional `prefab`, `category` (`weapon`/`tool`/`armor`), `slot` (`hands`/`head`/`body`/`beard`) | the player currently has a matching item equipped (live; unchecks when removed) |
 | `mine`    | `count`           | the player finishes mining `count` nodes with a pickaxe |
 | `pick`    | `prefab`, `count` | the player picks `count` of the plant prefab |
-| `plant`   | `count`, optional `prefab` (the held item) | the player plants `count` seeds in tilled soil or deploys `count` dug plants/plantables |
-| `fertilize` | `count`, optional `prefab` (a plant) | the player fertilizes `count` barren/withered bushes or grass |
+| `plant`   | `count`, optional `prefab` or `prefabs` (held items) | the player plants `count` seeds in tilled soil or deploys `count` dug plants/plantables |
+| `fertilize` | `count`, optional `prefab` (a plant), optional `self` | the player fertilizes `count` barren/withered plants, or with `self = true` fertilizes themself to heal (Wormwood) |
 | `collect_food` | `count`, optional `foodtype`/`secondaryfoodtype` | the player has held `count` edible items (peak holdings, like `collect`) |
 | `cook`    | `count`, optional `prefab` | the player cooks `count` food items on a fire |
 | `cookpot` | `count`, optional `prefab` | the player starts cooking `count` dishes in a Crock Pot (optional dish filter) |
@@ -67,6 +68,24 @@ are done. The card groups them below the required ones under an `Optional` headi
 renders them dimmed; on the completion card their real state is shown, so an unfinished
 optional objective stays unchecked.
 
+A row can also name a per-character replacement goal when one character cannot do it —
+Wigfrid and Warly refuse vegetable food, Wickerbottom cannot sleep, Wormwood gains no
+health from eating:
+
+```lua
+{ type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing",
+  overrides = {
+      wathgrithr = { type = "craft", prefab = "healingsalve", count = 1,
+                     label = "Craft a Healing Salve" },
+  } }
+```
+
+Keys are character prefab ids (`wathgrithr`, `warly`, `wurt`, `wickerbottom`); the row
+keeps its position and `optional` flag, and characters without an entry see the base
+row. Set the value to `false` to hide the row for that character altogether — for
+example, the sleep row on Wickerbottom's card. See
+[`docs/objectives.md`](docs/objectives.md), "Character overrides".
+
 A `build` row can set `shared = true` (only there). With **Multiplayer Mode** enabled
 in Mods → Configure, that row also counts an equivalent structure already standing
 within about 15 tiles, so players sharing a base do not each build a fire pit or a
@@ -80,10 +99,13 @@ The full reference — every field, default icon, and matching rule — is in
 `title` and `label` are required on every mission and objective. `collect` reads the
 player's inventory, so the starting
 inventory counts and stacked pickups register; the progress is peak holdings, so
-spending or dropping items later does not remove credit. `craft` and `build` are
+spending or dropping items later does not remove credit. `craft` also reads the
+inventory, so an item crafted before the mission started (or handed over) satisfies the
+row instead of demanding a duplicate. `craft`, `build` and `deploy` are
 deliberately separate: torches, spears, and other carryable products are `craft`;
-firepits, Science Machines, walls and other placed objects are `build`. Using the
-wrong type for a prefab means that objective never completes. Prefab ids are the
+firepits, Science Machines, walls and other placed objects are `build`; items you put
+down yourself and that consume or convert (Garden Digamajig, bird trap) are `deploy`.
+Using the wrong type for a prefab means that objective never completes. Prefab ids are the
 game's internal ids (e.g. `log`, `torch`, `firepit`, `researchlab` for the Science
 Machine).
 
@@ -179,7 +201,7 @@ Emergencies live in
 {
     id = "emergency_low_health",
     title = "Bleeding Out",
-    subtext = "Patch yourself up before something finishes the job.",
+    subtext = "Patch up before something finishes the job.",
     resolved_subtext = "You're stable again.",
     trigger = { kind = "stat", stat = "health", threshold = "<50" },
     resolve = { kind = "stat", stat = "health", threshold = ">=75" },

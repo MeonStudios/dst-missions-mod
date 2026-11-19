@@ -20,8 +20,8 @@ local function FindMissionIndexById(id)
     return nil
 end
 
-local function HasSurviveObjective(mission)
-    for _, objective in ipairs(mission.objectives or {}) do
+local function HasSurviveObjective(objectives)
+    for _, objective in ipairs(objectives or {}) do
         if objective.type == "survive" then
             return true
         end
@@ -38,16 +38,16 @@ local function SanitiseLabel(text)
     return (tostring(text):gsub("[|;]", " "))
 end
 
--- Pack the mission's objectives into the client's row format. Required rows
+-- Pack the resolved objectives into the client's row format. Required rows
 -- are emitted before optional ones regardless of authoring order, so the HUD
 -- can draw one "Optional" heading above the second group. `force_done` renders
 -- the required rows as complete for the 3-second completion hold; optional
 -- rows keep their real state so an unfinished one never shows a check.
-local function FormatRows(mission, progress, force_done)
+local function FormatRows(objectives, progress, force_done)
     local rows = {}
     for pass = 1, 2 do
         local want_optional = pass == 2
-        for i, objective in ipairs(mission.objectives or {}) do
+        for i, objective in ipairs(objectives or {}) do
             local optional = Objectives.IsOptional(objective)
             if optional == want_optional then
                 local value = progress[i] or 0
@@ -78,6 +78,11 @@ local GuidedMissionManager = Class(function(self, inst)
     self.inst = inst
     self.mission_index = 0
     self.current_mission = nil
+    -- The active mission's objective rows resolved for this player's character
+    -- (see Objectives.ResolveAll). Every progress/match/render loop reads this,
+    -- never `mission.objectives`, so a character override is applied exactly
+    -- once per activation.
+    self.objectives = {}
     self.progress = {}
     self.completed = false
     self.started = false
@@ -101,16 +106,19 @@ local GuidedMissionManager = Class(function(self, inst)
     self.emergency = nil
     self.suspended_mission = nil
     self.suspended_progress = nil
+    self.suspended_objectives = nil
     self.fired_emergencies = {}
     -- Pending 3-second recovered-card hold (see ResolveEmergency).
     self.emergency_hold_task = nil
 
-    -- Inventory-derived objectives (collect, collect_food) are reread from the
-    -- inventory, never accumulated from events -- but an event is still what
-    -- triggers the reread. These four cover every way an item joins the
-    -- inventory; see Objectives.ReconcileProgress and docs/dst-api.md.
-    -- Inventory-item recipes (torch) fire `builditem`; structures (firepit,
-    -- researchlab) fire `buildstructure` instead. See objectives.lua.
+    -- Inventory-derived objectives (collect, collect_food, craft) are reread
+    -- from the inventory, never accumulated from events -- but an event is
+    -- still what triggers the reread. These four cover every way an item joins
+    -- the inventory; see Objectives.ReconcileProgress and docs/dst-api.md.
+    -- `craft` also keeps its `builditem` credit (it listens below); the reread
+    -- makes a row complete when the item is already carried. Inventory-item
+    -- recipes (torch) fire `builditem`; structures (firepit, researchlab) fire
+    -- `buildstructure` instead. See objectives.lua.
     local function oninventory(_, _)
         self:OnInventoryChanged()
     end
@@ -123,6 +131,13 @@ local GuidedMissionManager = Class(function(self, inst)
     end)
     inst:ListenForEvent("buildstructure", function(_, data)
         self:OnObjectiveEvent("buildstructure", data)
+    end)
+    -- `deployitem` is vanilla: `Deployable:Deploy` pushes it on the deployer
+    -- with the item's prefab (components/deployable.lua:132-142), covering
+    -- deployables such as the Garden Digamajig and bird traps. Placing a
+    -- structure from the build menu is `buildstructure` instead.
+    inst:ListenForEvent("deployitem", function(_, data)
+        self:OnObjectiveEvent("deployitem", data)
     end)
     inst:ListenForEvent("killed", function(_, data)
         self:OnObjectiveEvent("killed", data)
@@ -223,6 +238,11 @@ local GuidedMissionManager = Class(function(self, inst)
     inst:ListenForEvent("guidedmissions_fertilized", function(_, data)
         self:OnObjectiveEvent("guidedmissions_fertilized", data)
     end)
+    -- Pushed by modmain's `fertilizable` post-init when a player fertilizes
+    -- themself (Wormwood); `data.fertilizer` is the item's prefab.
+    inst:ListenForEvent("guidedmissions_self_fertilized", function(_, data)
+        self:OnObjectiveEvent("guidedmissions_self_fertilized", data)
+    end)
     inst:ListenForEvent("unlockrecipe", function(_, data)
         self:OnUnlockRecipe(data)
     end)
@@ -283,6 +303,10 @@ function GuidedMissionManager:Begin()
         if self.current_mission == nil then
             self.completed = true
             self.mission_index = #Missions + 1
+            self.objectives = {}
+        else
+            self.objectives = Objectives.ResolveAll(
+                self.current_mission.objectives, self.inst.prefab)
         end
         self:Sync()
         self:RefreshLiveObjectives()
@@ -367,20 +391,23 @@ function GuidedMissionManager:SetMission(index)
 
     if mission == nil then
         self.current_mission = nil
+        self.objectives = {}
         self.progress = {}
         self.completed = true
         self:Sync()
         -- Chat is composed by the server, so it uses the server's locale.
-        self:Announce(L10n.L(Strings.ALL_COMPLETE_CHAT))
+        self:Announce(L10n.Lfmt(Strings.ALL_COMPLETE_CHAT, self.inst:GetDisplayName()))
         return
     end
 
     self.completed = false
     self.current_mission = mission
+    -- Resolve character overrides once; every later loop reads this list.
+    self.objectives = Objectives.ResolveAll(mission.objectives, self.inst.prefab)
     self.progress = {}
     self.last_poll_day = nil
 
-    for i, objective in ipairs(mission.objectives or {}) do
+    for i, objective in ipairs(self.objectives) do
         self.progress[i] = Objectives.InitialProgress(self.inst, objective)
     end
 
@@ -405,7 +432,7 @@ function GuidedMissionManager:OnObjectiveEvent(event, data)
     end
 
     local changed = false
-    for i, objective in ipairs(self.current_mission.objectives or {}) do
+    for i, objective in ipairs(self.objectives) do
         local increment = Objectives.GetEventIncrement(objective, event, data, self.inst)
         if increment > 0 then
             self.progress[i] = (self.progress[i] or 0) + increment
@@ -449,7 +476,7 @@ function GuidedMissionManager:ReconcileInventory()
     end
 
     local changed = false
-    for i, objective in ipairs(self.current_mission.objectives or {}) do
+    for i, objective in ipairs(self.objectives) do
         local value = Objectives.ReconcileProgress(self.inst, objective, self.progress[i])
         if value ~= self.progress[i] then
             self.progress[i] = value
@@ -477,7 +504,7 @@ function GuidedMissionManager:RefreshLiveObjectives()
     end
 
     local changed = false
-    for i, objective in ipairs(mission.objectives or {}) do
+    for i, objective in ipairs(self.objectives) do
         local value = Objectives.LiveProgress(self.inst, objective)
         if value ~= nil and value ~= self.progress[i] then
             self.progress[i] = value
@@ -511,7 +538,7 @@ function GuidedMissionManager:OnPoll()
         return
     end
 
-    if not HasSurviveObjective(self.current_mission) then
+    if not HasSurviveObjective(self.objectives) then
         return
     end
 
@@ -584,18 +611,21 @@ function GuidedMissionManager:ActivateEmergency(entry)
         return false
     end
 
-    -- Pause the chain: keep both the mission and its exact progress table.
+    -- Pause the chain: keep the mission, its resolved rows and its exact
+    -- progress table.
     self.suspended_mission = self.current_mission
     self.suspended_progress = self.progress
+    self.suspended_objectives = self.objectives
 
     -- Not marked as fired here: only a resolved card counts as seen (see
     -- ResolveEmergency).
     self.emergency = entry
     self.current_mission = entry
+    self.objectives = Objectives.ResolveAll(entry.objectives, self.inst.prefab)
     self.progress = {}
     self.last_poll_day = nil
 
-    for i, objective in ipairs(entry.objectives or {}) do
+    for i, objective in ipairs(self.objectives) do
         self.progress[i] = Objectives.InitialProgress(self.inst, objective)
     end
 
@@ -624,12 +654,13 @@ function GuidedMissionManager:ResolveEmergency()
         title = entry.title,
         subtext = entry.resolved_subtext or entry.subtext or "",
         hint = "",
-        rows = FormatRows(entry, self.progress, false),
+        rows = FormatRows(self.objectives, self.progress, false),
         state = "won",
     })
 
     self.emergency = nil
     self.current_mission = nil
+    self.objectives = {}
     self.progress = {}
 
     self:Log(L10n.Lfmt(
@@ -647,9 +678,11 @@ function GuidedMissionManager:ResolveEmergency()
         self.emergency_hold_task = nil
 
         self.current_mission = self.suspended_mission
+        self.objectives = self.suspended_objectives or {}
         self.progress = self.suspended_progress or {}
         self.suspended_mission = nil
         self.suspended_progress = nil
+        self.suspended_objectives = nil
         self.last_poll_day = nil
 
         if self.current_mission == nil then
@@ -685,6 +718,7 @@ function GuidedMissionManager:ClearEmergency()
     self.emergency = nil
     self.suspended_mission = nil
     self.suspended_progress = nil
+    self.suspended_objectives = nil
 end
 
 function GuidedMissionManager:CheckCompletion()
@@ -700,7 +734,7 @@ function GuidedMissionManager:CheckCompletion()
         return
     end
 
-    for i, objective in ipairs(mission.objectives or {}) do
+    for i, objective in ipairs(self.objectives) do
         -- Optional objectives are tracked but never gate completion.
         if not Objectives.IsOptional(objective)
             and not Objectives.IsComplete(objective, self.progress[i] or 0) then
@@ -725,13 +759,14 @@ function GuidedMissionManager:CompleteCurrentMission()
         -- No hint on the completion card: every row is checked and the helper
         -- button would only clutter the 3-second hold.
         hint = "",
-        rows = FormatRows(mission, self.progress, true),
+        rows = FormatRows(self.objectives, self.progress, true),
         state = "won",
     })
 
     -- Clearing the mission makes objective events and the poller ignore
     -- progress for the duration of the hold.
     self.current_mission = nil
+    self.objectives = {}
     self.progress = {}
 
     self:Announce(L10n.Lfmt(
@@ -773,7 +808,7 @@ function GuidedMissionManager:Sync()
             title = entry.title,
             subtext = entry.subtext or "",
             hint = entry.hint or "",
-            rows = FormatRows(entry, self.progress, false),
+            rows = FormatRows(self.objectives, self.progress, false),
             state = "emergency",
         })
         return
@@ -790,7 +825,7 @@ function GuidedMissionManager:Sync()
         -- Optional per-mission hint, shown by the tracker behind a hover on the
         -- "?" button. Absent (nil) is written as "" so the button hides.
         hint = mission.hint or "",
-        rows = FormatRows(mission, self.progress, false),
+        rows = FormatRows(self.objectives, self.progress, false),
         state = "active",
     })
 end
@@ -822,9 +857,10 @@ function GuidedMissionManager:OnSave()
         mission_id = mission ~= nil and mission.id or nil,
         progress = progress,
         completed = self.completed,
-        -- Only "server" frequency survives a load; "session" intentionally
-        -- re-arms when the session ends.
-        fired_emergencies = Settings.emergency_frequency == "server"
+        -- "session" must travel with the save too: a shard transfer serializes
+        -- the player, and OnLoad decides whether the load starts a new session
+        -- or continues one. "always" remembers nothing.
+        fired_emergencies = Settings.emergency_frequency ~= "always"
             and self.fired_emergencies or nil,
     }
 end
@@ -843,9 +879,17 @@ function GuidedMissionManager:OnLoad(data)
     self.completed = data.completed == true
     self.loaded = true
 
+    -- "server" keeps the fired set across any load. "session" re-arms on a
+    -- fresh join or world load, but keeps it through a shard migration: moving
+    -- to the caves and back is still one session. The engine marks a migration
+    -- on `inst.migration` during OnPreLoad, which runs before component OnLoad
+    -- (scripts/prefabs/player_common.lua:1257; scripts/entityscript.lua:1988
+    -- vs :2005 -- see docs/dst-api.md).
     self.fired_emergencies = {}
-    if Settings.emergency_frequency == "server"
-        and type(data.fired_emergencies) == "table" then
+    if type(data.fired_emergencies) == "table"
+        and (Settings.emergency_frequency == "server"
+            or (Settings.emergency_frequency == "session"
+                and self.inst.migration ~= nil)) then
         self.fired_emergencies = data.fired_emergencies
     end
 
@@ -862,11 +906,16 @@ function GuidedMissionManager:OnLoad(data)
     if self.started then
         if self.completed then
             self.current_mission = nil
+            self.objectives = {}
         else
             self.current_mission = Missions[self.mission_index]
             if self.current_mission == nil then
                 self.completed = true
                 self.mission_index = #Missions + 1
+                self.objectives = {}
+            else
+                self.objectives = Objectives.ResolveAll(
+                    self.current_mission.objectives, self.inst.prefab)
             end
         end
         self:Sync()

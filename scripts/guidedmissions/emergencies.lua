@@ -167,18 +167,24 @@ Emergencies.entries = {
     {
         id = "emergency_low_health",
         title = "Bleeding Out",
-        subtext = "Patch yourself up before something finishes the job.",
+        subtext = "Heal up before something finishes the job.",
         resolved_subtext = "You're stable again.",
         hint = "You can also eat Trail Mix, Pierogi or Fishsticks from the crock pot.",
         trigger = { kind = "stat", stat = "health", threshold = "<50" },
         resolve = { kind = "stat", stat = "health", threshold = ">=75" },
         objectives = {
-            -- Required goal row: matches `resolve`, so the card says what will
-            -- end the emergency. It is live (current percentage), not a count.
             { type = "reach_stat", stat = "health", threshold = ">=75", label = "Get back to 75% health" },
             { type = "craft", prefab = "healingsalve", count = 1, label = "Craft a Healing Salve", optional = true },
-            { type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing", optional = true },
-            { type = "sleep", count = 1, label = "Sleep in a tent", optional = true },
+            { type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing", optional = true,
+              overrides = {
+                  wathgrithr = { type = "eat", prefab = "meat_cooked", count = 1, label = "Eat cooked meat" },
+                  warly = { type = "eat", prefab = "trailmix", count = 1, label = "Eat Trail Mix" },
+                  wormwood = { type = "tip", label = "Food does not heal you" },
+              } },
+            { type = "sleep", count = 1, label = "Sleep in a tent", optional = true,
+              overrides = {
+                  wickerbottom = { type = "eat", prefab = "trailmix", count = 1, label = "Eat Trail Mix" },
+              } },
         },
     },
     {
@@ -191,10 +197,22 @@ Emergencies.entries = {
         resolve = { kind = "stat", stat = "sanity", threshold = ">=75" },
         objectives = {
             { type = "reach_stat", stat = "sanity", threshold = ">=75", label = "Get back to 75% sanity" },
-            { type = "eat", prefab = "green_cap_cooked", count = 1, label = "Eat a Cooked Green Cap", optional = true },
-            { type = "eat", prefab = "cactus_meat_cooked", count = 1, label = "Eat some Cooked Cactus Flesh", optional = true },
+
+            { type = "eat", prefab = "green_cap_cooked", count = 1, label = "Eat a Cooked Green Cap", optional = true,
+              overrides = {
+                  wathgrithr = { type = "pick", prefab = "flower", count = 1, label = "Pick a flower" },
+                  warly = { type = "pick", prefab = "flower", count = 1, label = "Pick a flower" },
+              } },
+            { type = "eat", prefab = "cactus_meat_cooked", count = 1, label = "Eat some Cooked Cactus Flesh", optional = true,
+              overrides = {
+                  wathgrithr = { type = "prototype", count = 1, label = "Prototype something new" },
+                  warly = { type = "prototype", count = 1, label = "Prototype something new" },
+              } },
             { type = "craft", prefab = "tophat", count = 1, label = "Craft a Top Hat", optional = true },
-            { type = "sleep", count = 1, label = "Sleep in a tent", optional = true },
+            { type = "sleep", count = 1, label = "Sleep in a tent", optional = true,
+              overrides = {
+                  wickerbottom = { type = "prototype", count = 1, label = "Prototype something new" },
+              } },
         },
     },
     {
@@ -203,13 +221,15 @@ Emergencies.entries = {
         subtext = "Your stomach is empty. Go find something to eat.",
         resolved_subtext = "You're fed again.",
         hint = "Go exploring to find some wild carrot or berries.",
-        -- Low enough to mean danger (starvation damage starts at 0), with a
-        -- wide gap back to 50% so eating one meal does not re-arm it instantly.
         trigger = { kind = "stat", stat = "hunger", threshold = "<25" },
         resolve = { kind = "stat", stat = "hunger", threshold = ">=70" },
         objectives = {
             { type = "reach_stat", stat = "hunger", threshold = ">=70", label = "Get back to 70% hunger" },
-            { type = "eat", prefab = "berries_cooked", count = 1, label = "Cook & eat some berries", optional = true },
+            { type = "eat", prefab = "berries_cooked", count = 1, label = "Cook & eat some berries", optional = true,
+              overrides = {
+                  wathgrithr = { type = "eat", prefab = "meat_cooked", count = 1, label = "Eat cooked meat" },
+                  warly = false,
+              } },
             { type = "trap_catch", count = 1, label = "Catch something in a trap", optional = true },
             { type = "cookpot", prefab = "meatballs", count = 1, label = "Cook meatballs", optional = true },
         },

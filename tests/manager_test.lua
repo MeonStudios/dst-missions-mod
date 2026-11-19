@@ -181,6 +181,9 @@ end
 local function NewInst(guid)
     local inst = {
         GUID = guid,
+        -- Character prefab id. Fixtures override this to exercise character
+        -- overrides; the real manager reads `player.prefab` the same way.
+        prefab = "wilson",
         components = {},
         _listeners = {},
         _tasks = {},
@@ -345,7 +348,7 @@ local needs_prefab = {
 -- one.
 local optional_prefab = {
     cook = true, cookpot = true, prototype = true, plant = true, trap_catch = true,
-    sleep = true, fertilize = true, equip = true,
+    sleep = true, fertilize = true, equip = true, deploy = true,
 }
 
 -- Shared by chain and emergency validation. Returns `optional == true` so the
@@ -361,6 +364,15 @@ local function ValidateObjectiveFields(where, objective, index)
         objective.shared == nil or type(objective.shared) == "boolean")
     Check(row .. " shared is only set on build rows",
         objective.shared ~= true or objective.type == "build")
+    -- `self` marks a `fertilize` row for fertilizing the player (Wormwood). It
+    -- takes no plant filter: `prefab` on a self row would be read as the plant
+    -- and could never match the player.
+    Check(row .. " self flag is a boolean",
+        objective.self == nil or type(objective.self) == "boolean")
+    Check(row .. " self is only set on fertilize rows",
+        objective.self ~= true or objective.type == "fertilize")
+    Check(row .. " self rows do not filter a plant",
+        objective.self ~= true or objective.prefab == nil)
 
     if needs_prefab[objective.type] then
         Check(row .. " names a prefab id", IsPrefabId(objective.prefab))
@@ -370,6 +382,21 @@ local function ValidateObjectiveFields(where, objective, index)
         Check(row .. " does not set a prefab", objective.prefab == nil)
     elseif objective.prefab ~= nil then
         Check(row .. " prefab filter is a prefab id", IsPrefabId(objective.prefab))
+    end
+
+    -- `prefabs` is the multi-id form of a filter and only `plant` reads it,
+    -- so a list on any other type would silently match nothing.
+    if objective.prefabs ~= nil then
+        Check(row .. " prefabs is only set on plant rows", objective.type == "plant")
+        Check(row .. " does not set both prefab and prefabs", objective.prefab == nil)
+        Check(row .. " prefabs is a non-empty table", type(objective.prefabs) == "table"
+            and #objective.prefabs > 0)
+        if type(objective.prefabs) == "table" then
+            for i = 1, #objective.prefabs do
+                Check(string.format("%s prefabs[%d] is a prefab id", row, i),
+                    IsPrefabId(objective.prefabs[i]))
+            end
+        end
     end
 
     Check(row .. " has a label",
@@ -408,9 +435,68 @@ local function ValidateObjectiveFields(where, objective, index)
         Check(row .. " has a count", tonumber(objective.count) ~= nil)
     end
 
+    -- Character overrides: `overrides` maps a character prefab id to a complete
+    -- replacement objective (docs/objectives.md, "Character overrides"), or to
+    -- `false` to hide the row for that character. The replacement must not
+    -- restate `optional` (the row slot owns that flag) and must not nest
+    -- another override, which would never be consulted.
+    if objective.overrides ~= nil then
+        Check(row .. " overrides is a table", type(objective.overrides) == "table")
+        if type(objective.overrides) == "table" then
+            for character, override in pairs(objective.overrides) do
+                local where_override = row .. " override " .. tostring(character)
+                Check(where_override .. " key is a character prefab id",
+                    IsPrefabId(character))
+                Check(where_override .. " is an objective table or false",
+                    type(override) == "table" or override == false)
+                if type(override) == "table" then
+                    Check(where_override .. " does not set optional",
+                        override.optional == nil)
+                    Check(where_override .. " is not nested",
+                        override.overrides == nil)
+                    -- A tip never completes, so replacing a required row with
+                    -- one would silently remove the mission's only gate.
+                    Check(where_override .. " tip is only used on optional rows",
+                        override.type ~= "tip" or objective.optional == true
+                            or objective.type == "tip")
+                    ValidateObjectiveFields(where_override, override, 1)
+                end
+            end
+        end
+    end
+
     -- A tip is always optional at runtime (Objectives.IsOptional), so it must
     -- not count as a row that gates completion here either.
     return objective.optional == true or objective.type == "tip"
+end
+
+-- `overrides = { <character> = false }` hides a row for that character. Only a
+-- hidden *required* row can remove a gate, so check that such a character keeps
+-- at least one required row (a mission with none completes instantly).
+local function ValidateHiddenRows(where, objectives)
+    local hidden_required = {}
+    for _, objective in ipairs(objectives or {}) do
+        if not Objectives.IsOptional(objective) then
+            for character, override in pairs(objective.overrides or {}) do
+                if override == false then
+                    hidden_required[character] = true
+                end
+            end
+        end
+    end
+
+    for character in pairs(hidden_required) do
+        local required = 0
+        for _, objective in ipairs(objectives or {}) do
+            local hidden = objective.overrides ~= nil
+                and objective.overrides[character] == false
+            if not hidden and not Objectives.IsOptional(objective) then
+                required = required + 1
+            end
+        end
+        Check(string.format("%s keeps a required row for %s", where,
+            tostring(character)), required > 0)
+    end
 end
 
 local seen_ids = {}
@@ -441,6 +527,7 @@ for i, mission in ipairs(RealMissions) do
     end
 
     Check(where .. " has at least one required objective", required_count > 0)
+    ValidateHiddenRows(where, mission.objectives)
 end
 
 -- Emergency data sanity, against the real emergencies.lua. The manager treats
@@ -551,6 +638,7 @@ for i, entry in ipairs(RealEmergencies.entries) do
     else
         Check(where .. " has only optional rows", required_count == 0)
     end
+    ValidateHiddenRows(where, entry.objectives)
 end
 
 -- Bad mission data also breaks the real-mission render smoke below, so report
@@ -660,8 +748,12 @@ end
 local function Activate(fixture_manager, player, mission)
     fixture_manager.current_mission = mission
     fixture_manager.completed = false
+    -- Mirror SetMission: resolve character overrides once, then seed progress
+    -- from the rows this player actually has.
+    fixture_manager.objectives = Objectives.ResolveAll(
+        mission.objectives, player.prefab)
     fixture_manager.progress = {}
-    for i, objective in ipairs(mission.objectives) do
+    for i, objective in ipairs(fixture_manager.objectives) do
         fixture_manager.progress[i] = Objectives.InitialProgress(player, objective)
     end
     fixture_manager:Sync()
@@ -1204,8 +1296,9 @@ Check("save mid-emergency stores the chain mission",
 Check("save mid-emergency stores chain progress", save_data.progress[1] == 1)
 Check("save mid-emergency never stores an emergency id",
     save_data.mission_id ~= "harness_emergency_health")
-Check("save mid-emergency omits a session fired set",
-    save_data.fired_emergencies == nil)
+Check("save mid-emergency stores a session fired set",
+    type(save_data.fired_emergencies) == "table"
+        and next(save_data.fired_emergencies) == nil)
 
 local reload_inst = NewInst(4002)
 SetHealth(reload_inst, 100, 100)
@@ -1217,6 +1310,53 @@ Check("load mid-emergency resumes the chain",
     Read(reload_inst)["guidedmissions.title"] == "Harness First")
 Check("load mid-emergency restores progress", Row(reload_inst, 1)[3] == "1/3")
 Check("load mid-emergency drops the overlay", reload_manager.emergency == nil)
+
+-- "session" carries the fired set through the save so a shard transfer keeps
+-- it (a caves trip is still the same session), while a fresh join re-arms.
+Settings.emergency_frequency = "session"
+local session_manager, session_player = Spawn()
+SetHealth(session_player, 40, 100)
+session_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("session test emergency active", State(session_player) == "emergency")
+SetHealth(session_player, 80, 100)
+session_player:Fire("healthdelta", { oldpercent = 0.4, newpercent = 0.8, amount = 40 })
+Advance(3)
+Check("session test resolved",
+    session_manager.fired_emergencies["harness_emergency_health"] == true)
+local session_save = session_manager:OnSave()
+Check("session save stores the fired set",
+    type(session_save.fired_emergencies) == "table"
+        and session_save.fired_emergencies["harness_emergency_health"] == true)
+
+-- A shard migration is not a new session: `inst.migration` is what
+-- player_common's OnPreLoad sets before the component loads.
+local migrated_inst = NewInst(4003)
+SetHealth(migrated_inst, 100, 100)
+migrated_inst.migration = {}
+Netvars.Attach(migrated_inst)
+local migrated_manager = Manager(migrated_inst)
+migrated_manager:OnLoad(session_save)
+Advance(1)
+Check("a migration restores the fired set",
+    migrated_manager.fired_emergencies["harness_emergency_health"] == true)
+SetHealth(migrated_inst, 40, 100)
+migrated_inst:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("a shard migration suppresses a repeat",
+    Read(migrated_inst)["guidedmissions.title"] == "Harness First")
+
+-- The same save loaded by a fresh join starts a new session and re-arms.
+local rejoined_inst = NewInst(4004)
+SetHealth(rejoined_inst, 100, 100)
+Netvars.Attach(rejoined_inst)
+local rejoined_manager = Manager(rejoined_inst)
+rejoined_manager:OnLoad(session_save)
+Advance(1)
+Check("a fresh join clears the fired set",
+    next(rejoined_manager.fired_emergencies) == nil)
+SetHealth(rejoined_inst, 40, 100)
+rejoined_inst:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("a fresh join re-arms the session emergency",
+    Read(rejoined_inst)["guidedmissions.title"] == "Harness Emergency Health")
 
 -- An admin jump clears the overlay; Reset also re-arms emergencies.
 local jump_manager, jump_player = Spawn()
@@ -1616,6 +1756,37 @@ type_fixtures.craft = function()
     Check("craft ignores other recipes", State(player) == "active")
     player:Fire("builditem", Build("axe"))
     Check("craft completes on builditem", State(player) == "won")
+
+    -- An item already carried satisfies the row without a duplicate craft: it
+    -- may have been crafted before the mission started or handed over.
+    local held_manager, held_player = Spawn()
+    Carry(held_player, "axe", 1)
+    Activate(held_manager, held_player, {
+        id = "fixture_craft_held",
+        title = "Craft",
+        subtext = "Make it.",
+        objectives = {
+            { type = "craft", prefab = "axe", count = 1, label = "Craft an axe" },
+        },
+    })
+    Check("craft counts starting inventory", Row(held_player, 1)[3] == "1/1")
+    held_manager:CheckCompletion()
+    Check("craft completes from starting inventory", State(held_player) == "won")
+
+    -- And the same row completes when the item arrives mid-mission without a
+    -- `builditem` event (picked up, found, or given).
+    local got_manager, got_player = Spawn()
+    Activate(got_manager, got_player, {
+        id = "fixture_craft_pickup",
+        title = "Craft",
+        subtext = "Make it.",
+        objectives = {
+            { type = "craft", prefab = "axe", count = 1, label = "Craft an axe" },
+        },
+    })
+    Carry(got_player, "axe", 1)
+    InventoryChanged(got_player)
+    Check("craft completes from a carried item", State(got_player) == "won")
 end
 
 type_fixtures.build = function()
@@ -1635,6 +1806,47 @@ type_fixtures.build = function()
     Check("build ignores builditem", State(player) == "active")
     player:Fire("buildstructure", Build("firepit"))
     Check("build completes on buildstructure", State(player) == "won")
+end
+
+type_fixtures.deploy = function()
+    local fixture_manager, player = Spawn()
+    Activate(fixture_manager, player, {
+        id = "fixture_deploy",
+        title = "Green Thumb",
+        subtext = "Dirt, seeds, patience.",
+        objectives = {
+            { type = "deploy", prefab = "farm_plow_item", count = 1, label = "Use a Garden Digamajig" },
+        },
+    })
+    Check("deploy label is rendered", Row(player, 1)[1] == "Use a Garden Digamajig")
+    Check("deploy icon is the prefab", Row(player, 1)[2] == "farm_plow_item")
+
+    -- Crafting it, or building a structure, is not deploying it.
+    player:Fire("builditem", Build("farm_plow_item"))
+    Check("deploy ignores builditem", State(player) == "active")
+    -- Vanilla pushes `deployitem` on the deployer with the item's prefab
+    -- (`components/deployable.lua:142`), after `ondeploy` may have removed it.
+    player:Fire("deployitem", { prefab = "birdtrap" })
+    Check("deploy filters other items", State(player) == "active")
+    player:Fire("deployitem", { prefab = "farm_plow_item" })
+    Check("deploy completes on deployitem", State(player) == "won")
+
+    -- Without a prefab any deployed item counts; `icon` names the row art
+    -- because an unfiltered row has no single item.
+    local any_manager, any_player = Spawn()
+    Activate(any_manager, any_player, {
+        id = "fixture_deploy_any",
+        title = "Put It Down",
+        subtext = "Somewhere useful.",
+        objectives = {
+            { type = "deploy", count = 2, icon = "birdtrap", label = "Deploy items" },
+        },
+    })
+    Check("unfiltered deploy uses the icon override", Row(any_player, 1)[2] == "birdtrap")
+    any_player:Fire("deployitem", { prefab = "birdtrap" })
+    Check("unfiltered deploy counts any item", Row(any_player, 1)[3] == "1/2")
+    any_player:Fire("deployitem", { prefab = "farm_plow_item" })
+    Check("unfiltered deploy completes at the target", State(any_player) == "won")
 end
 
 type_fixtures.kill = function()
@@ -1771,7 +1983,7 @@ type_fixtures.sleep = function()
         },
     })
     Check("sleep label is rendered", Row(player, 1)[1] == "Sleep in a tent")
-    Check("sleep row is text-only", Row(player, 1)[2] == "")
+    Check("filtered sleep row uses its bed's icon", Row(player, 1)[2] == "tent")
 
     -- The event is pushed by modmain's sleepingbaguser hook; it carries the bed
     -- entity, so a prefab filter matches its prefab.
@@ -1790,10 +2002,23 @@ type_fixtures.sleep = function()
             { type = "sleep", count = 2, label = "Sleep in a bed" },
         },
     })
+    Check("unfiltered sleep row defaults to the tent icon", Row(any_player, 1)[2] == "tent")
     any_player:Fire("guidedmissions_slept", { bed = { prefab = "bedroll_straw" } })
     Check("unfiltered sleep counts a bedroll", Row(any_player, 1)[3] == "1/2")
     any_player:Fire("guidedmissions_slept", { bed = { prefab = "siestahut" } })
     Check("unfiltered sleep completes at the target", State(any_player) == "won")
+
+    -- `icon` overrides the bed art for a row that wants a specific picture.
+    local icon_manager, icon_player = Spawn()
+    Activate(icon_manager, icon_player, {
+        id = "fixture_sleep_icon",
+        title = "Any Bed",
+        subtext = "Any port in a storm.",
+        objectives = {
+            { type = "sleep", count = 1, icon = "bedroll_straw", label = "Sleep in a bed" },
+        },
+    })
+    Check("sleep icon override wins", Row(icon_player, 1)[2] == "bedroll_straw")
 end
 
 type_fixtures.reach_stat = function()
@@ -2042,6 +2267,26 @@ type_fixtures.plant = function()
     Check("another dug plant is filtered out", State(dug_player) == "active")
     dug_player:Fire("guidedmissions_planted", { item = "dug_berrybush" })
     Check("the filtered dug plant completes", State(dug_player) == "won")
+
+    -- `prefabs` accepts any of several held items, so one row covers the
+    -- normal and juicy berry bushes (dug_berrybush, dug_berrybush2,
+    -- dug_berrybush_juicy; prefabs/plantables.lua:118-137).
+    local multi_manager, multi_player = Spawn()
+    Activate(multi_manager, multi_player, {
+        id = "fixture_plant_multi",
+        title = "Berry Options",
+        subtext = "Any bush will do.",
+        objectives = {
+            { type = "plant", prefabs = { "dug_berrybush", "dug_berrybush_juicy" },
+                count = 1, label = "Replant a berry bush" },
+        },
+    })
+    Check("multi-prefab plant icon is the first entry",
+        Row(multi_player, 1)[2] == "dug_berrybush")
+    multi_player:Fire("guidedmissions_planted", { item = "dug_sapling" })
+    Check("a prefab outside the list is filtered out", State(multi_player) == "active")
+    multi_player:Fire("guidedmissions_planted", { item = "dug_berrybush_juicy" })
+    Check("any listed prefab completes the row", State(multi_player) == "won")
 end
 
 type_fixtures.cook = function()
@@ -2055,7 +2300,7 @@ type_fixtures.cook = function()
         },
     })
     Check("cook label is rendered", Row(player, 1)[1] == "Cook food")
-    Check("cook row is text-only without a product", Row(player, 1)[2] == "")
+    Check("cook row defaults to the campfire icon", Row(player, 1)[2] == "campfire")
 
     player:Fire("guidedmissions_cookedfood", { product = { prefab = "cookedmeat" } })
     Check("cooked food counts", Row(player, 1)[3] == "1/2")
@@ -2270,6 +2515,45 @@ type_fixtures.fertilize = function()
         },
     })
     Check("fertilize icon override wins", Row(icon_player, 1)[2] == "berries")
+
+    -- A `self` row is the self-fertilize branch (Wormwood). It shows Manure by
+    -- default, counts only the self event, and a normal plant row never reacts
+    -- to the self event.
+    local self_manager, self_player = Spawn(function(target)
+        target.prefab = "wormwood"
+    end)
+    Activate(self_manager, self_player, {
+        id = "fixture_fertilize_self",
+        title = "Self Care",
+        subtext = "Feed yourself.",
+        objectives = {
+            { type = "fertilize", self = true, count = 1, label = "Fertilize yourself" },
+            { type = "fertilize", count = 1, label = "Fertilize a plant", optional = true },
+        },
+    })
+    Check("self fertilize label is rendered",
+        Row(self_player, 1)[1] == "Fertilize yourself")
+    Check("self fertilize default icon is manure", Row(self_player, 1)[2] == "poop")
+    self_player:Fire("guidedmissions_fertilized", { plant = { prefab = "grass" } })
+    Check("self row ignores plant fertilization", Row(self_player, 1)[3] == "0/1")
+    Check("plant row counts plant fertilization", Row(self_player, 2)[3] == "1/1")
+    self_player:Fire("guidedmissions_self_fertilized", { fertilizer = "rot" })
+    Check("self row counts self fertilization", Row(self_player, 1)[3] == "1/1")
+    Check("self fertilization completes the mission", State(self_player) == "won")
+
+    -- The plant branch never sees the self event either.
+    local plant_manager, plant_player = Spawn()
+    Activate(plant_manager, plant_player, {
+        id = "fixture_fertilize_self_only",
+        title = "Plant Only",
+        subtext = "Just plants.",
+        objectives = {
+            { type = "fertilize", count = 1, label = "Fertilize a plant" },
+        },
+    })
+    plant_player:Fire("guidedmissions_self_fertilized", { fertilizer = "manure" })
+    Check("plant row ignores self fertilization", Row(plant_player, 1)[3] == "0/1")
+    Check("a plant-only mission stays active", State(plant_player) == "active")
 end
 
 type_fixtures.equip = function()
@@ -2483,6 +2767,103 @@ for objective_type in pairs(type_fixtures) do
         Objectives.VALID_TYPES[objective_type] == true)
 end
 
+-- ---- character overrides ------------------------------------------------
+--
+-- `overrides` swaps one row's goal for a specific character (see
+-- docs/objectives.md, "Character overrides"). Rows keep their position and the
+-- slot's `optional` flag, and a character without an override sees the base row.
+
+local override_mission = {
+    id = "harness_override",
+    title = "Override",
+    subtext = "For some characters.",
+    objectives = {
+        { type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing",
+          overrides = {
+              wathgrithr = { type = "craft", prefab = "healingsalve", count = 1,
+                             label = "Craft a Healing Salve" },
+          } },
+        { type = "sleep", count = 1, label = "Sleep in a tent", optional = true,
+          overrides = {
+              -- `false` hides the row for that character entirely.
+              wickerbottom = false,
+              wormwood = { type = "tip", label = "Food does not heal you" },
+          } },
+    },
+}
+
+-- A character without an override sees the base rows unchanged.
+local base_manager, base_player = Spawn()
+Activate(base_manager, base_player, override_mission)
+Check("base character keeps the base label", Row(base_player, 1)[1] == "Eat a butterfly wing")
+Check("base character keeps the base goal", Row(base_player, 1)[2] == "butterflywings")
+Check("base character keeps the sleep row", Row(base_player, 2)[1] == "Sleep in a tent")
+
+-- Wigfrid's required row resolves to the salve; later rows stay in place.
+local wig_manager, wig_player = Spawn(function(target)
+    target.prefab = "wathgrithr"
+end)
+Activate(wig_manager, wig_player, override_mission)
+Check("Wigfrid sees the override label", Row(wig_player, 1)[1] == "Craft a Healing Salve")
+Check("override icon follows the new goal", Row(wig_player, 1)[2] == "healingsalve")
+Check("rows after the override stay in place", Row(wig_player, 2)[1] == "Sleep in a tent")
+Check("optional flag survives the override", Row(wig_player, 2)[5] == "1")
+wig_player:Fire("oneat", { food = { prefab = "butterflywings" } })
+Check("the base goal no longer counts", Row(wig_player, 1)[3] == "0/1")
+wig_player:Fire("builditem", Build("healingsalve"))
+Check("the override goal completes the mission", State(wig_player) == "won")
+
+-- Wickerbottom cannot sleep: each row resolved to `false` is dropped, so the
+-- card shows one row fewer rather than an unreachable goal.
+local wick_manager, wick_player = Spawn(function(target)
+    target.prefab = "wickerbottom"
+end)
+Activate(wick_manager, wick_player, override_mission)
+Check("Wickerbottom's sleep row is hidden", Row(wick_player, 2)[1] == nil)
+Check("the resolved list omits the hidden row", #wick_manager.objectives == 1)
+Check("the remaining row still renders",
+    Row(wick_player, 1)[1] == "Eat a butterfly wing")
+
+-- Wormwood's replacement is a tip: a row that never completes, but is shown.
+local worm_manager, worm_player = Spawn(function(target)
+    target.prefab = "wormwood"
+end)
+Activate(worm_manager, worm_player, override_mission)
+Check("Wormwood sees the tip", Row(worm_player, 2)[1] == "Food does not heal you")
+Check("the tip starts unchecked", Row(worm_player, 2)[4] == "0")
+worm_player:Fire("guidedmissions_slept", { bed = { prefab = "tent" } })
+Check("the tip never completes", Row(worm_player, 2)[4] == "0")
+
+-- The real restore_health mission gives every character who cannot eat
+-- butterfly wings (or gains nothing from food) a route their diet allows.
+do
+    local restore_health
+    for _, mission in ipairs(RealMissions) do
+        if mission.id == "restore_health" then
+            restore_health = mission
+        end
+    end
+    Check("the real restore_health mission exists", restore_health ~= nil)
+    if restore_health ~= nil then
+        local expected = {
+            wathgrithr = "Craft a Healing Salve",
+            warly = "Eat Trail Mix",
+            wormwood = "Fertilize yourself",
+        }
+        for character, label in pairs(expected) do
+            local manager, player = Spawn(function(target)
+                target.prefab = character
+            end)
+            Activate(manager, player, restore_health)
+            Check(character .. " sees " .. label, Row(player, 1)[1] == label)
+        end
+        local manager, player = Spawn()
+        Activate(manager, player, restore_health)
+        Check("other characters keep the butterfly wing",
+            Row(player, 1)[1] == "Eat a butterfly wing")
+    end
+end
+
 -- ---- real mission render smoke ------------------------------------------
 --
 -- Activate every mission in the real chain and check it renders one well-formed
@@ -2492,13 +2873,7 @@ end
 
 for i, mission in ipairs(RealMissions) do
     local smoke_manager, player = Spawn()
-    smoke_manager.current_mission = mission
-    smoke_manager.completed = false
-    smoke_manager.progress = {}
-    for j, objective in ipairs(mission.objectives or {}) do
-        smoke_manager.progress[j] = Objectives.InitialProgress(player, objective)
-    end
-    smoke_manager:Sync()
+    Activate(smoke_manager, player, mission)
 
     local label = string.format("real mission %d (%s) renders", i, tostring(mission.id))
     local rows = Rows(Read(player)["guidedmissions.rows"])

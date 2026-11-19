@@ -50,6 +50,57 @@ A `tip` row is always optional and never completes at all — see [`tip`](#tip) 
 Missions run in file order. Each player advances independently after a 3-second
 "won" hold. The last mission is followed by a terminal "All Missions Complete" card.
 
+### Character overrides
+
+Some characters cannot perform a goal at all: Wigfrid only swallows meat and
+goodies, Warly only eats Crock Pot food, Wickerbottom cannot sleep. A row can
+name a replacement goal per character prefab:
+
+```lua
+{ type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing",
+  overrides = {
+      wathgrithr = { type = "craft", prefab = "healingsalve", count = 1,
+                     label = "Craft a Healing Salve" },
+      warly = { type = "craft", prefab = "healingsalve", count = 1,
+                label = "Craft a Healing Salve" },
+  } },
+```
+
+- **Keys are character prefab ids** (`wathgrithr`, `warly`, `wurt`,
+  `wickerbottom`, `wormwood`, ...), read from the player. A character without an
+  entry sees the base row unchanged; the override is resolved once when the
+  mission (or emergency) starts.
+- **The value is a complete objective** — its own `type`, fields and `label`
+  (another translation key) — validated by the same rules as a base row.
+- **`false` hides the row for that character.** No tracker row and no progress
+  slot are created, so the card is simply shorter; the hidden label is never
+  sent and needs no translation. Use it for advice that would only ever apply
+  to other characters, such as a sleep row on Wickerbottom's card:
+
+  ```lua
+  { type = "sleep", count = 1, label = "Sleep in a tent", optional = true,
+    overrides = { wickerbottom = false } }
+  ```
+
+  Hiding a **required** row is allowed only if at least one other required row
+  remains for that character (the harness enforces it): a mission with no
+  required rows completes the moment it starts. After a data update that adds
+  or removes hidden rows, that character's remaining rows shift index, which
+  can misalign in-progress saved progress for that character only.
+- **A replacement changes only the goal.** The row keeps its position, its
+  progress index and its `optional` flag, so an override cannot turn a required
+  row optional for one character. (Hiding a row is the exception: it removes the
+  row and its slot.) Do not set `optional` inside an override, and do not nest
+  another `overrides` table.
+- **A `tip` override** (guidance that never completes) is allowed only on a row
+  that is already optional; a tip can never satisfy a required gate.
+- Missions and emergency entries both support overrides. The mission `hint` is
+  shared by every character (it is not overridable), so word it to cover both
+  routes.
+- Character abilities are engine facts, not data the mod reads: entries are
+  maintained by hand. The current restrictions are recorded in
+  [`dst-api.md`](dst-api.md), "Character restrictions".
+
 ### Text and translation
 
 `title`, `subtext`, `hint`, and every objective `label` are **translation keys**: the
@@ -88,12 +139,15 @@ completion. See [`emergencies.md`](emergencies.md) for the full schema.
 
 There are three mechanisms:
 
-- **Inventory-derived (reread on inventory events):** `collect`, `collect_food`.
-  Any player `itemget`, `gotnewitem`, `newactiveitem`, or `setoverflow` schedules
-  one reread on the next tick and a burst of pickups coalesces into that one read.
-  Progress is the **peak holding** seen since the mission started — spending or
-  dropping items never removes credit, but picking items up later can raise it.
-  The inventory at the moment the mission starts counts as the starting value.
+- **Inventory-derived (reread on inventory events):** `collect`, `collect_food`,
+  and `craft`. Any player `itemget`, `gotnewitem`, `newactiveitem`, or
+  `setoverflow` schedules one reread on the next tick and a burst of pickups
+  coalesces into that one read. Progress is the **peak holding** seen since the
+  mission started — spending or dropping items never removes credit, but picking
+  items up later can raise it. The inventory at the moment the mission starts
+  counts as the starting value. `craft` is a special case: it also credits the
+  `builditem` craft event, and the inventory read is what lets an item crafted
+  before the mission started (or handed over by a teammate) satisfy the row.
 - **Live state (polled every second):** `survive` reads the world day, `equip`
   mirrors the current equipment slots, and `reach_stat` mirrors its stat.
   Equip rows also refresh immediately on `equip`/`unequip`, and
@@ -158,7 +212,7 @@ Acquire items and hold them.
 
 ### `craft`
 
-Craft `count` inventory items.
+Craft or already have `count` inventory items.
 
 | Field | Required | Default |
 |---|---|---|
@@ -166,9 +220,14 @@ Craft `count` inventory items.
 | `count` | yes | — |
 
 - **Completes when:** the player crafts an item whose recipe or product id is
-  `prefab`, `count` times.
+  `prefab`, or already carries `count` of it. An item crafted before the mission
+  started, found, or handed over by a teammate counts too — the player is never
+  asked to craft a duplicate of something already in the inventory.
 - **Trigger:** the `builditem` player event, fired for products that go into the
-  inventory (torch, spear, axes, armour).
+  inventory (torch, spear, axes, armour), plus the inventory reread described
+  under [How progress is counted](#how-progress-is-counted). Progress is the
+  higher of crafts observed and the **peak** inventory count, so dropping the
+  item does not remove credit.
 - **Icon:** `prefab`.
 - **Not for:** structures placed in the world — those fire `buildstructure` only.
   Use `build` for firepits, Science Machines, walls, chests, and so on. The wrong
@@ -211,6 +270,40 @@ This reads world entities only: it creates no shared or team mission state.
 ```lua
 { type = "build", prefab = "researchlab", count = 1, label = "Build a Science Machine",
   shared = true }
+```
+
+### `deploy`
+
+Deploy `count` deployable items on the ground.
+
+| Field | Required | Default |
+|---|---|---|
+| `count` | yes | — |
+| `prefab` | no | any deployable item |
+| `icon` | no | `prefab`, otherwise none |
+
+- **Completes when:** the player successfully deploys an item, `count` times.
+  Deploying is the right-click/click-on-the-world action for items that are put
+  down and consume or convert themselves: the Garden Digamajig, bird traps,
+  boat kits, turf.
+- **Trigger:** the `deployitem` player event, pushed by `Deployable:Deploy` with
+  the item's prefab (`components/deployable.lua:142`). Credit lands on the
+  action, not on any delayed effect — the digamajig drills for a moment and
+  returns the item before the soil appears.
+- **Matching:** `prefab` compares the deployed item's id (`farm_plow_item`,
+  `birdtrap`). Without a filter any deployable counts.
+- **Overlap with `plant`:** planting a dug bush or a seed is also a deploy and
+  fires `deployitem`, so a `plant` row and a `deploy` row can both see the same
+  action. Use `plant` when the mission means planting; `deploy` when it means
+  putting an item down.
+- **Not for:** structures placed from the build menu (campfire, firepit,
+  Science Machine) — those fire `buildstructure` only. Use `build`.
+- **Icon:** the item's own art (`farm_plow_item`); an unfiltered row has no
+  single item, so `icon` can point at one.
+
+```lua
+{ type = "deploy", prefab = "farm_plow_item", count = 1, label = "Use a Garden Digamajig" }
+{ type = "deploy", count = 1, icon = "birdtrap", label = "Deploy something" }
 ```
 
 ### `kill`
@@ -267,6 +360,7 @@ Enter a sleeping bag `count` times.
 |---|---|---|
 | `count` | yes | — |
 | `prefab` | no | any sleeping bag |
+| `icon` | no | the matched bed, otherwise `tent` |
 
 - **Completes when:** the player gets into a tent, siesta hut, or bedroll,
   `count` times.
@@ -279,7 +373,9 @@ Enter a sleeping bag `count` times.
 - **Matching:** without `prefab`, any sleeping bag counts. Set
   `prefab = "tent"` to require a tent specifically (the bed entity's prefab is
   matched), or `"siestahut"` for the lean-to.
-- **Icon:** none — the row is text-only, and `icon` is ignored.
+- **Icon:** the matched bed's build-menu art when `prefab` is set (`tent`,
+  `siestahut`, `bedroll_straw`, ...), otherwise the tent (`tent`). `icon`
+  overrides either.
 
 ```lua
 { type = "sleep", prefab = "tent", count = 1, label = "Sleep in a tent" }
@@ -522,7 +618,8 @@ a tree seed or kelp root.
 |---|---|---|
 | `count` | yes | — |
 | `prefab` | no | any plantable item |
-| `icon` | no | `prefab`, otherwise `seeds` |
+| `prefabs` | no | — (any of several plantable items; not with `prefab`) |
+| `icon` | no | `prefab` (or the first `prefabs` entry), otherwise `seeds` |
 
 - **Completes when:** the player plants `count` things. Two engine paths count,
   and they are the same player intent ("put a plant in the ground"), so they
@@ -543,12 +640,16 @@ a tree seed or kelp root.
   seeds use seed ids (`farm_plant_carrot` is the grown crop and never matches)
   and dug plants use their `dug_` id (`berrybush`, the bush itself, never
   matches).
+- **`prefabs` accepts any listed id** when several kinds are the same intent;
+  it replaces `prefab` rather than combining with it. The berry bushes are the
+  common case: normal `dug_berrybush`/`dug_berrybush2` and juicy
+  `dug_berrybush_juicy` (`prefabs/plantables.lua:118-137`).
 - **Does not count:** planting in the retired `slow_farmplot`/`fast_farmplot`
   structures (those use the old `grower` component), or dropping a seed on the
   ground.
-- **Icon:** the held item's prefab when `prefab` is set — a dug plant has no
-  inventory art, so set `icon = "berries"` for a berry bush — otherwise the
-  generic `seeds` art. Override with `icon`.
+- **Icon:** the held item's prefab when `prefab` is set (or the first `prefabs`
+  entry) — a dug plant has no inventory art, so set `icon = "berries"` for a
+  berry bush — otherwise the generic `seeds` art. Override with `icon`.
 
 ```lua
 { type = "plant", prefab = "carrot_seeds", count = 3, label = "Plant carrots" }
@@ -565,7 +666,8 @@ Fertilize `count` barren or withered plants.
 |---|---|---|
 | `count` | yes | — |
 | `prefab` | no | any pickable plant |
-| `icon` | no | `prefab`, otherwise `rot` |
+| `self` | no | off (fertilize a plant) |
+| `icon` | no | `prefab`; for `self`, `poop`; otherwise `rot` |
 
 - **Completes when:** the player fertilizes a planted bush, grass tuft or reeds
   `count` times. Any fertilizer counts — rot, manure, guano, compost, spoiled
@@ -583,17 +685,30 @@ Fertilize `count` barren or withered plants.
 - **Matching:** `prefab` filters the **plant that was fertilized**, not the
   fertilizer used: `berrybush`, `berrybush_juicy`, `grass`, `reeds`. Variants
   are separate ids, so `berrybush` does not match `berrybush_juicy`.
-- **Does not count:** fertilizing a crop in tilled farm soil, an old
-  `slow_farmplot`/`fast_farmplot`, or the player themself — those are other
-  branches of the `FERTILIZE` action and are deliberately not reported.
+- **Does not count:** fertilizing a crop in tilled farm soil or an old
+  `slow_farmplot`/`fast_farmplot` — those are other branches of the `FERTILIZE`
+  action and are deliberately not reported. The player-themself branch is a
+  separate row shape, below.
+- **Self-fertilizing (`self = true`):** inverts the row to the player instead of
+  a plant. Wormwood applies Rot, Manure, Guano, a Bucket-o'-Poop or any other
+  fertilizer to himself to heal; the row completes when he does so. **Any
+  fertilizer counts** (all of them heal him through their nutrients), so there
+  is no `prefab` filter — setting one is rejected. The heal itself also credits
+  a `heal` row through the normal health-delta event.
+  - Trigger: a `guidedmissions_self_fertilized` event pushed by the mod's
+    `fertilizable` component wrapper.
+  - The ordinary plant branch and the self branch never cross-match: a plant
+    row ignores self-fertilizing and a self row ignores plants.
 - **Icon:** the plant id when `prefab` is set, but plants are world entities
   with no inventory icon, so a filtered row draws nothing unless `icon` names an
-  item (`berries` for a berry bush). An unfiltered row shows the `rot` item.
+  item (`berries` for a berry bush). An unfiltered row shows the `rot` item; a
+  `self` row shows the `poop` (Manure) item unless `icon` overrides it.
 
 ```lua
 { type = "fertilize", count = 1, label = "Fertilize a plant" }
 { type = "fertilize", prefab = "berrybush", count = 1, icon = "berries",
   label = "Fertilize a berry bush" }
+{ type = "fertilize", self = true, count = 1, label = "Fertilize yourself" }
 ```
 
 ### `collect_food`
@@ -642,8 +757,8 @@ Cook `count` items on a **fire**.
   `cookedcarrot`).
 - **Not the Crock Pot:** it uses a different component. `cook` never satisfies
   `cookpot` and vice versa.
-- **Icon:** the cooked product when `prefab` is set, otherwise none. There is no
-  `icon` field — `prefab` is the art id.
+- **Icon:** the cooked product when `prefab` is set, otherwise the campfire
+  (`campfire`). There is no `icon` field — `prefab` is the art id.
 
 ```lua
 { type = "cook", count = 1, prefab = "cookedmeat", label = "Cook meat" }
@@ -734,6 +849,7 @@ Show an informational row that never completes.
 | Hold items | `collect` / `collect_food` |
 | Craft a carryable | `craft` |
 | Place a structure | `build` |
+| Put down a deployable item (digamajig, bird trap) | `deploy` |
 | Eat one specific food | `eat` |
 | Hold any food | `collect_food` |
 | Cook on a fire | `cook` |
@@ -742,6 +858,7 @@ Show an informational row that never completes.
 | Chop / mine / pick verbs | `chop` / `mine` / `pick` |
 | Plant a seed or replant a dug plant | `plant` |
 | Fertilize a bush or grass tuft | `fertilize` |
+| Fertilize yourself to heal (Wormwood) | `fertilize` with `self = true` |
 | Sleep in a tent | `sleep` |
 | Reach a stat percentage | `reach_stat` |
 | Have a weapon/tool/armour equipped | `equip` |
@@ -754,8 +871,9 @@ Show an informational row that never completes.
 | `collect` | inventory event, reread next tick | inventory prefab + stack size (peak) |
 | `collect_food` | inventory event, reread next tick | `edible` component + stack size (peak) |
 | `survive` | 1 s poll | world day (`cycles + 1`) |
-| `craft` | `builditem` | `data.recipe.name` or `data.item.prefab` |
+| `craft` | `builditem`, plus inventory event reread | `data.recipe.name` or `data.item.prefab`; inventory prefab + stack size (peak) |
 | `build` | `buildstructure`, plus a 1 s poll for `shared` rows | `data.recipe.name` or `data.item.prefab`; nearby `structure` entities matching `prefab` |
+| `deploy` | `deployitem` | `data.prefab` (the deployed item) |
 | `kill` | `killed` | `data.victim.prefab` |
 | `eat` | `oneat` | `data.food.prefab` |
 | `pick` | `picksomething` | `data.object.prefab` |
@@ -770,6 +888,7 @@ Show an informational row that never completes.
 | `trap_catch` | `guidedmissions_trapchecked` (mod pushed) | objective `prefab` matched against any entry in `data.loot` |
 | `sleep` | `guidedmissions_slept` (mod pushed) | objective `prefab` matched to `data.bed.prefab` |
 | `fertilize` | `guidedmissions_fertilized` (mod pushed) | objective `prefab` matched to `data.plant.prefab` |
+| `fertilize` (`self = true`) | `guidedmissions_self_fertilized` (mod pushed) | any fertilizer applied to the player |
 | `reach_stat` | `healthdelta` / `sanitydelta` / `hungerdelta` + 1 s poll (wetness/temperature: poll only) | live stat value vs objective `threshold` (percent, or degrees for temperature) |
 | `equip` | `equip` / `unequip` + 1 s poll | live `inventory.equipslots`, filtered by `prefab`/`category`/`slot` |
 | `tip` | none | never completes (no progress, no counter) |

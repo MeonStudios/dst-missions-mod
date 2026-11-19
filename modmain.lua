@@ -243,6 +243,28 @@ AddComponentPostInit("pickable", function(self)
     end
 end)
 
+-- Self-fertilizing is the fourth branch of FERTILIZE: Wormwood applies Rot,
+-- Manure, Guano or a Bucket-o'-Poop to himself. The action calls
+-- `doer.components.fertilizable:Fertilize(item)` (`actions.lua:1830-1832`), and
+-- the item's nutrients heal him (`prefabs/wormwood.lua:529-544`), so report the
+-- item once the character's callback accepts it. Only players matter here; the
+-- event is pushed on the fertilized entity, which is the player. See
+-- docs/dst-api.md, "Fertilizing".
+AddComponentPostInit("fertilizable", function(self)
+    local _Fertilize = self.Fertilize
+    self.Fertilize = function(component, fertilizer)
+        local fertilizer_prefab = fertilizer ~= nil and fertilizer.prefab or nil
+        local applied = _Fertilize(component, fertilizer)
+        local inst = component.inst
+        if applied and inst ~= nil and inst:HasTag("player") and inst.PushEvent ~= nil then
+            inst:PushEvent("guidedmissions_self_fertilized", {
+                fertilizer = fertilizer_prefab,
+            })
+        end
+        return applied
+    end
+end)
+
 -- Traps. The player learns what they caught only when they check the trap:
 -- the CHECKTRAP action calls `Trap:Harvest(doer)` (`actions.lua:1686-1689`).
 -- The trap's stored loot is what the objective filters on, so report it to the

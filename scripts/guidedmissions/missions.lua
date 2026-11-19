@@ -49,6 +49,13 @@
 -- objectives under an "Optional" heading and dims them. Each mission needs at
 -- least one required objective.
 --
+-- A row may set `overrides = { <character prefab> = <objective> }` when one
+-- character cannot do the goal (Wigfrid and Warly refuse vegetable food,
+-- Wickerbottom cannot sleep, Wormwood gains no health from food). The row keeps
+-- its position and `optional` flag; characters without an entry see the base
+-- row. Use `false` instead of an objective to hide the row for that character
+-- entirely. See docs/objectives.md, "Character overrides".
+--
 -- Missions are informational only: completing one gives no items or other
 -- in-game benefit.
 
@@ -59,9 +66,8 @@ return {
         subtext = "All great stories start somewhere.",
         objectives = {
             { type = "collect", prefab = "flint", count = 3, label = "Collect flint" },
-            { type = "collect", prefab = "twigs", count = 10, label = "Collect twigs" },
-            { type = "collect", prefab = "cutgrass", count = 10, label = "Collect grass" },
-            { type = "pick", prefab = "flower", count = 1, label = "Pick a flower", optional = true },
+            { type = "collect", prefab = "twigs", count = 8, label = "Collect twigs" },
+            { type = "collect", prefab = "cutgrass", count = 8, label = "Collect grass" },
         },
     },
     {
@@ -108,9 +114,17 @@ return {
         id = "restore_health",
         title = "An Apple a Day...",
         subtext = "Things will hurt you. Learn how to fix that.",
-        hint = "Kill butterflies by standing on them and use the force attack keybind (Ctrl + F)",
+        hint = "Eat a butterfly wing (kill one with Ctrl + F), or use a Healing Salve.",
         objectives = {
-            { type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing" },
+            { type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing",
+              overrides = {
+                  wathgrithr = { type = "craft", prefab = "healingsalve", count = 1, label = "Craft a Healing Salve" },
+                  warly = { type = "eat", prefab = "trailmix", count = 1, label = "Eat Trail Mix" },
+                  -- Wormwood heals by fertilizing himself (Rot, Manure, Guano,
+                  -- Bucket-o'-Poop); any fertilizer counts.
+                  wormwood = { type = "fertilize", self = true, count = 1,
+                               label = "Fertilize yourself" },
+              } },
             { type = "heal", count = 10, label = "Restore at least 10 health" },
         },
     },
@@ -177,7 +191,7 @@ return {
         hint = "Both need charcoal: burn a tree, then chop the burnt remains.",
         objectives = {
             { type = "build", prefab = "cookpot", count = 1, label = "Build a Crock Pot", shared = true },
-            { type = "build", prefab = "meatrack", count = 1, label = "Build a Drying Rack" },
+            { type = "build", prefab = "meatrack", count = 1, label = "Build a Drying Rack", shared = true },
             { type = "cookpot", count = 1, label = "Cook a meal in a Crock Pot" },
         },
     },
@@ -188,9 +202,8 @@ return {
         hint = "Dig plants up with a Shovel. Bushes & Grass need poop or spoiled food.",
         objectives = {
             { type = "craft", prefab = "shovel", count = 1, label = "Craft a Shovel" },
-            { type = "plant", prefab = "dug_berrybush", count = 1, label = "Replant a berry bush" },
-            { type = "plant", prefab = "dug_sapling", count = 2, label = "Replant saplings" },
-            { type = "fertilize", count = 1, label = "Fertilize your bush", optional = true },
+            { type = "plant", prefabs = { "dug_berrybush", "dug_berrybush2", "dug_berrybush_juicy" }, count = 1, label = "Replant a berry bush" },
+            { type = "fertilize", count = 1, label = "Fertilize your bush" },
         },
     },
     {
@@ -218,9 +231,9 @@ return {
         subtext = "Dirt, seeds, patience. Mostly patience.",
         hint = "Gather seeds by chasing away birds.",
         objectives = {
-            { type = "craft", prefab = "farm_plow_item", count = 1, label = "Craft a Garden Digamajig" },
+            { type = "deploy", prefab = "farm_plow_item", count = 1, label = "Use a Garden Digamajig" },
             { type = "craft", prefab = "farm_hoe", count = 1, label = "Craft a Garden Hoe" },
-            { type = "plant", count = 4, label = "Plant seeds" },
+            { type = "plant", prefab = "seeds", count = 4, label = "Plant seeds" },
         },
     },
     {

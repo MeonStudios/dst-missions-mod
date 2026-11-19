@@ -134,6 +134,14 @@ end
 local function AddObjectives(where, objectives)
     for i, objective in ipairs(objectives or {}) do
         AddSource(where .. " objective " .. i, objective.label)
+        -- Character overrides carry their own label, which is a translation key
+        -- like any other row label. `false` hides the row and has no label.
+        for character, override in pairs(objective.overrides or {}) do
+            if type(override) == "table" then
+                AddSource(where .. " objective " .. i .. " override "
+                    .. tostring(character), override.label)
+            end
+        end
     end
 end
 
@@ -251,6 +259,11 @@ for _, mission in ipairs(Missions) do
     AddBudget(mission.hint, 80)
     for _, objective in ipairs(mission.objectives or {}) do
         AddBudget(objective.label, 28)
+        for _, override in pairs(objective.overrides or {}) do
+            if type(override) == "table" then
+                AddBudget(override.label, 28)
+            end
+        end
     end
 end
 
@@ -261,6 +274,11 @@ for _, entry in ipairs(Emergencies.entries or {}) do
     AddBudget(entry.hint, 80)
     for _, objective in ipairs(entry.objectives or {}) do
         AddBudget(objective.label, 28)
+        for _, override in pairs(objective.overrides or {}) do
+            if type(override) == "table" then
+                AddBudget(override.label, 28)
+            end
+        end
     end
 end
 

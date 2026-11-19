@@ -57,6 +57,22 @@ function Objectives.GetLabel(objective)
     return objective.label
 end
 
+-- Optional prefab filter: `prefab` names one id, `prefabs` accepts any in a
+-- list, and neither accepts anything. Used where several kinds of item are the
+-- same intent (`plant` rows: a normal or juicy berry bush). Only `plant` reads
+-- `prefabs` today; mission data is validated accordingly.
+local function MatchesPrefabFilter(objective, prefab)
+    if objective.prefabs ~= nil then
+        for i = 1, #objective.prefabs do
+            if objective.prefabs[i] == prefab then
+                return true
+            end
+        end
+        return false
+    end
+    return objective.prefab == nil or prefab == objective.prefab
+end
+
 -- Optional objectives are tracked and rendered like any other, but never block
 -- mission completion (`optional = true` in mission data). A `tip` is guidance,
 -- not a goal, so it is always optional whatever the flag says.
@@ -69,6 +85,50 @@ end
 -- only: the same structure already standing nearby satisfies the row.
 function Objectives.IsShared(objective)
     return objective.shared == true
+end
+
+-- Character overrides. A row may name a replacement goal per character prefab
+-- (`overrides = { wathgrithr = {...} }`) for a goal that character cannot
+-- complete: Wigfrid and Warly refuse vegetable food and Wickerbottom cannot
+-- sleep. The replacement is a complete objective; `optional` is a property of
+-- the row slot, not of the goal, so the base row's flag is copied onto it and
+-- an override cannot turn a required row optional for one character.
+--
+-- `false` instead of a table hides the row for that character: no tracker row
+-- and no progress slot at all. The label of a hidden row is never sent, so it
+-- needs no translation entries.
+function Objectives.IsHiddenForCharacter(objective, prefab)
+    return objective ~= nil and objective.overrides ~= nil and prefab ~= nil
+        and objective.overrides[prefab] == false
+end
+
+function Objectives.ForCharacter(objective, prefab)
+    local override = objective ~= nil and objective.overrides ~= nil
+        and prefab ~= nil and objective.overrides[prefab] or nil
+    if override == nil or override == false then
+        return objective
+    end
+
+    local row = {}
+    for key, value in pairs(override) do
+        row[key] = value
+    end
+    row.optional = objective.optional
+    return row
+end
+
+-- Resolve every row for one player. Called once when a mission or emergency
+-- activates; the manager keeps the result and uses it for progress, matching
+-- and rendering, so a character never changes mid-mission. Hidden rows are
+-- omitted, so the resolved list is what progress indices refer to.
+function Objectives.ResolveAll(objectives, prefab)
+    local resolved = {}
+    for _, objective in ipairs(objectives or {}) do
+        if not Objectives.IsHiddenForCharacter(objective, prefab) then
+            resolved[#resolved + 1] = Objectives.ForCharacter(objective, prefab)
+        end
+    end
+    return resolved
 end
 
 -- The pre-formatted counter shown on the right of a tracker row. This is SOURCE
@@ -127,9 +187,11 @@ function Objectives.GetIconPrefab(objective)
         return objective.icon or STAT_ICON_PREFABS[objective.stat]
     end
     if objective.type == "sleep" then
-        -- Tents and bedrolls are world/inventory objects without a useful row
-        -- icon here; the row is deliberately text-only (`icon` is ignored).
-        return nil
+        -- Beds are world entities, but the tent, siesta hut and bedrolls each
+        -- have build-menu art in the item atlases (`tent.tex`,
+        -- `siestahut.tex`, `bedroll_straw.tex`, ...), so a filtered row shows
+        -- its bed and an unfiltered one defaults to the tent. `icon` overrides.
+        return objective.icon or objective.prefab or "tent"
     end
     if objective.type == "chop" then
         -- A chop objective has no prefab of its own: trees are matched by tag,
@@ -160,8 +222,11 @@ function Objectives.GetIconPrefab(objective)
     if objective.type == "plant" then
         -- The planted crop is a world entity with no inventory icon, but the
         -- seed the player held has one (`carrot_seeds`, `pumpkin_seeds`, ...).
-        -- An unfiltered objective shows the generic seed art; `icon` overrides.
-        return objective.icon or objective.prefab or "seeds"
+        -- A `prefabs` filter shows its first entry. An unfiltered objective
+        -- shows the generic seed art; `icon` overrides.
+        return objective.icon or objective.prefab
+            or (objective.prefabs ~= nil and objective.prefabs[1])
+            or "seeds"
     end
     if objective.type == "collect_food" then
         -- "Any food" has no single icon; `icon` can point at one.
@@ -169,8 +234,12 @@ function Objectives.GetIconPrefab(objective)
     end
     if objective.type == "cook" or objective.type == "cookpot" then
         -- The icon is the cooked product or dish itself, so `prefab` doubles
-        -- as the art id. There is no separate `icon` field; an unfiltered
-        -- objective has no single item to show and renders text-only.
+        -- as the art id. There is no separate `icon` field. An unfiltered
+        -- `cook` row shows the campfire doing the cooking; an unfiltered
+        -- `cookpot` row has no single dish to show and renders text-only.
+        if objective.type == "cook" and objective.prefab == nil then
+            return "campfire"
+        end
         return objective.prefab
     end
     if objective.type == "prototype" then
@@ -189,6 +258,11 @@ function Objectives.GetIconPrefab(objective)
         -- filtered row (`berrybush`, `grass`) usually has no inventory art and
         -- draws nothing unless `icon` points at an item (e.g. `berries`). An
         -- unfiltered row shows the rot item, the most common fertilizer.
+        -- A `self` row fertilizes the player; any fertilizer counts, so the
+        -- row shows Manure unless `icon` overrides it.
+        if objective.self == true then
+            return objective.icon or "poop"
+        end
         return objective.icon or objective.prefab or "rot"
     end
     if objective.type == "equip" then
@@ -209,6 +283,12 @@ function Objectives.GetIconPrefab(objective)
             return "armorwood"
         end
         return nil
+    end
+
+    if objective.type == "deploy" then
+        -- The deployed item's own art (`farm_plow_item`, `birdtrap`); an
+        -- unfiltered row has no single item, so `icon` can point at one.
+        return objective.icon or objective.prefab
     end
 
     if objective.type == "collect" or objective.type == "craft"
@@ -395,7 +475,10 @@ function Objectives.LiveProgress(inst, objective)
 end
 
 function Objectives.InitialProgress(inst, objective)
-    if objective.type == "collect" then
+    -- `craft` seeds from the inventory like `collect`: an item the player
+    -- already carries (crafted before the mission started, or handed over by a
+    -- teammate) satisfies the row without forcing a duplicate craft.
+    if objective.type == "collect" or objective.type == "craft" then
         return Objectives.CountInInventory(inst, objective.prefab)
     end
     if objective.type == "collect_food" then
@@ -408,8 +491,9 @@ function Objectives.InitialProgress(inst, objective)
     return 0
 end
 
--- collect/collect_food progress is derived from the inventory, never accumulated from
--- events. Two verified engine behaviours make event counting unsafe:
+-- collect/collect_food/craft progress is derived from the inventory, never
+-- accumulated from events alone. For collect/collect_food two verified engine
+-- behaviours make event counting unsafe:
 --   * `itemget` fires only when an item lands in an *empty* slot, so pickups
 --     that merge into an existing stack are invisible (stackable:Put emits
 --     nothing), and
@@ -420,9 +504,14 @@ end
 -- never falls when they are spent or dropped, and internal inventory moves do
 -- not change it. The manager calls this from its inventory-event handler
 -- (deferred one tick, see OnInventoryChanged), not from a periodic poll.
+--
+-- `craft` keeps its `builditem` credit (see GetEventIncrement) and takes the
+-- same inventory peak on top, so a craft row also completes while the item is
+-- carried -- the player may have crafted it before the mission started, or a
+-- teammate may hand one over. The peak means dropping it again keeps credit.
 function Objectives.ReconcileProgress(inst, objective, progress)
     local value = tonumber(progress) or 0
-    if objective.type == "collect" then
+    if objective.type == "collect" or objective.type == "craft" then
         return math.max(value, Objectives.CountInInventory(inst, objective.prefab))
     end
     if objective.type == "collect_food" then
@@ -544,6 +633,16 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
         if MatchesRecipe(objective, data) then
             return 1
         end
+    elseif event == "deployitem" then
+        -- Pushed on the deployer by `Deployable:Deploy` after its `ondeploy`
+        -- callback ran (`components/deployable.lua:132-142`), so the deployed
+        -- item may already be removed; the payload is its prefab id. Planting a
+        -- dug bush or seed is also a deploy and fires this too -- `plant` is the
+        -- type for that, while `deploy` means "place this item".
+        if objective.type == "deploy"
+            and (objective.prefab == nil or data.prefab == objective.prefab) then
+            return 1
+        end
     elseif event == "killed" then
         local victim = data.victim
         if objective.type == "kill" and victim ~= nil and victim.prefab == objective.prefab then
@@ -603,10 +702,11 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
         -- (`carrot_seeds`, `seeds`) for tilled soil, or a dug plant
         -- (`dug_berrybush`) or other plantable (`pinecone`, `acorn`) for a
         -- deploy. It is never the crop or bush that grows from it. See
-        -- docs/dst-api.md, "Farming and planting".
+        -- docs/dst-api.md, "Farming and planting". `prefabs` lets one row
+        -- accept several kinds, e.g. normal and juicy berry bushes
+        -- (`dug_berrybush`, `dug_berrybush2`, `dug_berrybush_juicy`).
         if objective.type == "plant" then
-            local item = data.item
-            if objective.prefab == nil or item == objective.prefab then
+            if MatchesPrefabFilter(objective, data.item) then
                 return 1
             end
         end
@@ -648,10 +748,18 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
         -- or grass tuft emits no player event. `plant` is the fertilized
         -- entity, so `prefab` matches the plant (`berrybush`, `grass`), not the
         -- fertilizer. Farm crops and old farm plots are not reported, so this
-        -- only ever sees a pickable plant.
-        if objective.type == "fertilize"
+        -- only ever sees a pickable plant. `self` rows are the player-targeting
+        -- branch and are matched by the event below.
+        if objective.type == "fertilize" and objective.self ~= true
             and (objective.prefab == nil
                 or (data.plant ~= nil and data.plant.prefab == objective.prefab)) then
+            return 1
+        end
+    elseif event == "guidedmissions_self_fertilized" then
+        -- Pushed by modmain's `fertilizable` post-init when a player fertilizes
+        -- themself -- Wormwood applying Rot, Manure, Guano or a Bucket-o'-Poop.
+        -- Any fertilizer counts: all of them heal him through their nutrients.
+        if objective.type == "fertilize" and objective.self == true then
             return 1
         end
     end
@@ -667,6 +775,7 @@ Objectives.VALID_TYPES = {
     collect = true,
     craft = true,
     build = true,
+    deploy = true,
     kill = true,
     survive = true,
     chop = true,

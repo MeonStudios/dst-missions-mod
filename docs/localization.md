@@ -170,10 +170,11 @@ the same order as the source (`%%` is literal).
 
 ## Authoring text
 
-- `title`, `subtext`, `hint`, `resolved_subtext`, and objective `label` are translation
-  keys. Keep them single-line and free of `|`, `;`, quotes, CR, and LF. (A source `|`
-  would be sanitised before the client sees it and the translation would silently
-  miss.)
+- `title`, `subtext`, `hint`, `resolved_subtext`, objective `label`, and the `label`
+  of every visible character override are translation keys. (An override set to
+  `false` hides its row and has no label.) Keep them single-line and free of `|`, `;`,
+  quotes, CR, and LF. (A source `|` would be sanitised before the client sees it and
+  the translation would silently miss.)
 - Labels carry no count; the tracker renders the counter separately. Do not bake the
   target into a label except where the wording needs it (the emergency goal rows).
 - After changing any source text, run:
