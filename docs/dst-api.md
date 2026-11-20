@@ -57,6 +57,7 @@ processes, takes minutes, and is the slowest way to answer anything.
 | Client-side saved preferences | `scripts/mainfunctions.lua` (`SetPersistentString`), `scripts/craftingmenuprofile.lua` |
 | Performance / profiling | `scripts/profiler.lua`, `perfutil.lua`, `consolecommands.lua` |
 | Translation / locale codes | `scripts/languages/loc.lua`, `scripts/translator.lua`, `scripts/main.lua` (boot order), `scripts/modutil.lua` (`LoadPOFile`) |
+| Local checkout vs. subscribed Workshop copy; how mods are matched when a client joins | `scripts/modindex.lua` (`GetModsToLoad`, `InitializeModInfo`, `DoesModExist`), `scripts/networking.lua` (`DownloadMods`), `scripts/mods.lua` (`GetEnabledModsModInfoDetails`) |
 
 If a signature is in doubt, check here rather than guessing — DST's API is loosely
 documented and version-dependent.
@@ -111,6 +112,87 @@ documented and version-dependent.
   Consequence for any texture generated outside ktech: multiply RGB by alpha
   before DXT5 encoding, or soft edges render too bright in-game. The checked-in
   PNG stays straight-alpha; only the `.tex` data is premultiplied.
+
+## Mod loading: local folders, Workshop copies, and client/server matching
+
+Verified 2026-11-20 against the installed scripts.
+
+- **A mod's identity is its folder name** under the game's `mods/` directory.
+  `ModIndex:GetModsToLoad` (`modindex.lua:273`) enumerates
+  `TheSim:GetModDirectoryNames()`; enable flags, settings, the server handshake and
+  save entries all use that name, not `modinfo.name`.
+- **Subscribed Workshop mods appear as `mods/workshop-<id>`** (`workshop_prefix` at
+  `modindex.lua:214`, `GetWorkshopIdNumber` at `:237`). On this machine those are
+  real copies, not junctions to `steamapps/workshop/content/322330/<id>`; the
+  content dir updates first and the `mods/workshop-*` copy is the one the game
+  loads. A local checkout in any other folder (e.g. the junction
+  `mods/dst-mission-mod`) is a **separate mod** as far as the game is concerned.
+- **`modinfo.lua` runs with `folder_name` set to its folder name**
+  (`modindex.lua:599-604`, `InitializeModInfo`). This is the supported way for one
+  source tree to label a non-Workshop copy (the convention seen in the Wormhole
+  Icons Workshop mod). Gate on **one exact folder name** — this repo uses
+  `folder_name == "guided-missions-dev"` — not on "not `workshop-`": the
+  Workshop uploader also executes `modinfo.lua` (see *Publishing* below) with the
+  uploaded folder's name, which is the repo's (`dst-mission-mod`), so a general
+  check would rename the published title to "Guided Missions (dev)". `name` is
+  display only and is never used for matching.
+- **Joining a server matches mods by folder name and version.** The server sends
+  its enabled server mods as `{ name = <folder>, info_name = <modinfo.name>,
+  version, version_compatible, all_clients_require_mod }`
+  (`mods.lua:110-123`, `GetEnabledModsModInfoDetails`). `DownloadMods`
+  (`networking.lua:347-430`) requires, for every entry with
+  `all_clients_require_mod = true`,
+  `KnownModIndex:DoesModExist(mod_name, version)` (`modindex.lua:1261-1285`):
+  exact folder-name lookup, and an exact `version` string unless the mod declares
+  `version_compatible`, which switches to a range check. On a miss the client only
+  tries `QueueDownloadTempMod`, which resolves Workshop items; a folder that exists
+  only locally cannot be fetched. So a **dev copy cannot be joined by players who
+  only have the Workshop build**, even with identical code: they need a copy under
+  the same folder name with the same version string, or a second Workshop item for
+  dev builds.
+- Required server mods are **temp-enabled automatically on join**
+  (`networking.lua:350-353`), overriding the client's Mods-menu choices for that
+  session. Players need the folder present; they don't have to tick it.
+- Installing both the local checkout and the subscribed copy is fine, but **enable
+  only one**: both enabled runs the mod twice (duplicate netvar declarations on
+  every player entity, duplicate listeners, two trackers).
+- **A shard transfer re-checks the mod folders.** Following a player into the
+  caves makes the client (including the hosting client) tear down and restart its
+  Lua state, then re-scan `mods/` for the caves shard's required list. Renaming or
+  removing a mod folder **while a world is running** therefore disconnects on the
+  first cave trip even though the world loaded fine: `client_log.txt` shows
+  `ModIndex:GetModsToLoad inserting forcedmoddir, <old-name>`,
+  `Loading mod: <old-name> Version: (No modinfo.lua, using defaults...)`,
+  `Failed to find mod <old-name> v:<version>` and finally
+  `PushNetworkDisconnectEvent With Reason: "SERVER_MODS_NOT_ON_WORKSHOP"`. The
+  server logs show a normal migration and **no Lua error** — nothing is wrong with
+  the mod code. Restart the world after renaming a folder (observed 2026-11-20 for
+  the dev junction rename `dst-mission-mod` → `guided-missions-dev`, renamed
+  mid-session; the world kept loading `<old-name>` from its server settings).
+
+### Publishing to the Workshop (verified 2026-11-20)
+
+- Uploads use **`ModUploader.exe`** from
+  `steamapps/common/Don't Starve Mod Tools` (the official tool; it supports DST via
+  `UGCModUploader`/`WORKSHOP_DONT_STARVE_TOGETHER`). It is **not** part of the game
+  client — nothing under `scripts/` implements uploading.
+- The uploader executes `modinfo.lua` itself (`GetLuaString`/`GetLuaBool` lines in
+  its log), so any `name`/`version` value computed there is what gets published.
+- Its file filter is narrow and fixed. Always skipped: files and directories whose
+  name starts with `.` (so `.git`, `.gitignore`, `.editorconfig` stay local). With
+  **"Upload redundant files"** *unchecked* (the remembered option; its label is
+  "certain files don't need to be uploaded, check this if you want them to"),
+  "redundant formats" are skipped too — in the 2026-11-14 upload that was every
+  `.png` (source images; the game only loads `.tex`). **Everything else is
+  uploaded**: `.md`, `.tsv`, `.cmd`, `CLAUDE.md`, `docs/`, `tests/`, `tools/`,
+  `verify.cmd`. There is no option to exclude arbitrary dev files; use a staging
+  copy if that matters.
+- Every skipped file is logged by name and reason in
+  `%LOCALAPPDATA%\Don't Starve Mod Uploader\ModUploader.log`, along with the tags
+  it derives (`all_clients_require_mod`, `interface`, `tutorial`,
+  `version:<version>`).
+- Updating an existing item requires `version` to differ from the Workshop's
+  current version; `version_compatible` must be less than or equal to it.
 
 ## Mod environment and strict mode
 
@@ -445,6 +527,29 @@ Verified 2026-11-14 against `components/moisture.lua` and
   `HORRIBLE`, `INSECT`, `SEEDS` (plural — not `SEED`), `BERRY`, `RAW`, `BURNT`, `NITRE`,
   `ROUGHAGE`, `WOOD`, `GOODIES`, `MONSTER`, `LUNAR_SHARDS`, `CORPSE`, `MIASMA`.
   Comparisons are exact strings.
+- **`VEGGIE` is a cooking class, not "vegetable":** these inventory items are
+  `foodtype = FOODTYPE.VEGGIE` despite not being produce — `butterflywings`
+  (`prefabs/butterflywings.lua:39`), `moonbutterflywings` (`:38`), `petals` /
+  `petals_evil` (`prefabs/petals.lua:89`, `prefabs/petals_evil.lua`), `lightbulb`
+  (`prefabs/lightbulb.lua:69`), `foliage` (`prefabs/foliage.lua:63`), `forgetmelots`
+  (`prefabs/forgetmelots.lua:49`), `firenettles` (`prefabs/firenettles.lua:54`),
+  `tillweed` (`prefabs/tillweed.lua:44`), `succulent_picked`
+  (`prefabs/succulent_plant.lua:127`), `moon_tree_blossom`
+  (`prefabs/moontree_blossom.lua:60`), `wormlight` / `wormlight_lesser`
+  (`prefabs/wormlight.lua:122,138`), `cutlichen` (`prefabs/cutlichen.lua`),
+  `ipecacsyrup` (`prefabs/ipecacsyrup.lua`), `boatpatch_kelp`
+  (`prefabs/boatpatch.lua:129`), `ancientfruit_nightvision` and its cooked form
+  (`prefabs/ancienttree_fruits.lua:447`), plus the `*_dried` variants generated in
+  `prefabs/driedplants.lua` from `driedplants_defs.lua`. Every Crock Pot product is
+  also VEGGIE when its main ingredient is, and adds the `preparedfood` tag
+  (`prefabs/preparedfoods.lua:73`) — filter on that tag instead of listing dishes.
+  Seasonal event foods are VEGGIE without the tag: `halloweencandy_3`, `_6`, `_7`,
+  `_14` (`prefabs/halloweencandy.lua:88-102`), `winter_food4`, `_6`, `_7`
+  (`prefabs/wintersfeastfood.lua:92-107`), `carnivalfood_corntea`
+  (`prefabs/carnival_food.lua:4`). A `collect_food` row that means "gathered
+  vegetables" therefore names its ids with `prefabs` (an allow-list) rather than
+  filtering by `foodtype`; `Objectives` also supports `exclude` (prefab ids) and
+  `exclude_tags` (tags) when a broad type must be kept.
 - `Inventory:ForEachItem` (`components/inventory.lua:667-685`) visits item slots, equip
   slots, the active/cursor item and the overflow container. The overflow container
   **is** a worn body container: `GetOverflowContainer` (`:1459-1467`) returns the
@@ -796,10 +901,34 @@ tracker (`session` mode must not re-arm on a caves trip).
   then `inst:OnLoad` at `:2011`. A component can therefore test
   `self.inst.migration ~= nil` to tell "this load is a shard migration" from
   "this is a new session".
-- Nothing in `player_common.lua` clears `inst.migration` after arrival. If that
-  value is later written into an ordinary autosave, a fresh join would see a
-  non-nil migration too — the manager treats that as "still the same session",
-  which can only keep an emergency suppressed, never fire one twice.
+- **`inst.migration` is cleared on spawn, not on load.**
+  `PlayerSpawner:SpawnAtLocation` (`components/playerspawner.lua:239-262`) reads
+  it to place the migrated player near the portal, then sets
+  `player.migration = nil` at `:260`. Autosaves after that write `migration =
+  nil`.
+- **Unspawned entities keep it, so a save file can hold a *stale* migration
+  record.** If a player entity is loaded but never spawned — the client is
+  rejected at the mod handshake, or the world shuts down mid-transfer — it
+  retains `inst.migration`, and `player_common.lua:1217` writes it back to disk
+  (2026-11-20: a mod-folder rename mid-session rejected the caves join, and the
+  caves' shutdown save carried the master's migration payload). A later load of
+  that file sees `inst.migration ~= nil` even though it is a fresh join, so
+  `inst.migration` alone must not be used to mean "same session".
+- **Tell a live transfer from a stale record with the world-session id.**
+  `TheWorld.meta.session_identifier` is the shard's persistent id generated at
+  worldgen (`worldgen_main.lua:473`; the `Begin Session:` value in the logs,
+  stable across runs). `PlayerSpawner` puts the *source* shard's value in the
+  migration record as `sessionid` (`playerspawner.lua:87-95`), alongside
+  `worldid` (the source shard id). A component's own `OnSave` runs on the same
+  source shard just before serialization, so stamping it with
+  `TheWorld.meta.session_identifier` yields a record where the two agree; a
+  stale disk record was written by a *different* shard and they disagree.
+  `worldid ~= TheShard:GetShardId()` additionally rejects a failed transfer
+  being restored on the shard it was leaving. The manager uses exactly this in
+  `IsLiveMigration` (`manager.lua`).
+- This identifier is **not** per server run: it is saved with the world, so
+  master and caves keep distinct ids across restarts (verified 2026-11-20: same
+  ids in consecutive log runs). It distinguishes shards, not sessions.
 
 ## Hound waves
 

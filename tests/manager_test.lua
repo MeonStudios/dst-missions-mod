@@ -95,7 +95,11 @@ STRINGS = { NAMES = {
     COOKEDMEAT = "Cooked Meat",
     MEATBALLS = "Meatballs",
 } }
-TheWorld = { state = { cycles = 0 } }
+-- `meta.session_identifier` is the shard's persistent world-session id; the
+-- manager stamps saves with it to tell a live shard transfer from a stale
+-- migration record in a save file. `TheShard:GetShardId()` is this shard.
+TheWorld = { state = { cycles = 0 }, meta = { session_identifier = "HARNESS_WORLD_SESSION" } }
+TheShard = { GetShardId = function() return "HARNESS_SHARD" end }
 -- Nearby world entities for `shared` build rows. The stub filters by tag and
 -- radius the way the engine does, so the `structure` tag filter and the radius
 -- are exercised rather than mocked away. Entries:
@@ -273,37 +277,45 @@ local function Rows(rows)
     return out
 end
 
-local function Item(prefab, stack_size)
-    local item = { prefab = prefab, components = {} }
-    if stack_size ~= nil then
-        item.components.stackable = { StackSize = function() return stack_size end }
+-- Every stubbed item carries `HasTag` because the objective matcher reads tags
+-- through it (`exclude_tags`) and a real inventory item always answers it.
+local function StubItem(prefab, components, tags)
+    local item = { prefab = prefab, components = components or {} }
+    function item:HasTag(tag)
+        return tags ~= nil and tags[tag] == true
     end
-    return { item = item }
+    return item
+end
+
+local function Item(prefab, stack_size)
+    local components = {}
+    if stack_size ~= nil then
+        components.stackable = { StackSize = function() return stack_size end }
+    end
+    return { item = StubItem(prefab, components) }
 end
 
 local function Build(prefab)
-    return { recipe = { name = prefab }, item = { prefab = prefab, components = {} } }
+    return { recipe = { name = prefab }, item = StubItem(prefab) }
 end
 
 -- Add a stack of `prefab` to the player's inventory. Collect objectives reread
 -- this after an inventory event (the event payload carries no count).
 local function Carry(target, prefab, count)
-    target.items[#target.items + 1] = {
-        prefab = prefab,
-        components = { stackable = { StackSize = function() return count end } },
-    }
+    target.items[#target.items + 1] = StubItem(prefab, {
+        stackable = { StackSize = function() return count end },
+    })
 end
 
 -- Add an edible item stack. `secondaryfoodtype` is how berries and
--- berries_juicy share the BERRY tag despite being main-type VEGGIE.
-local function CarryFood(target, prefab, count, foodtype, secondaryfoodtype)
-    target.items[#target.items + 1] = {
-        prefab = prefab,
-        components = {
-            stackable = { StackSize = function() return count end },
-            edible = { foodtype = foodtype, secondaryfoodtype = secondaryfoodtype },
-        },
-    }
+-- berries_juicy share the BERRY tag despite being main-type VEGGIE. `tags` is
+-- the entity tag set the objective's `exclude_tags` filter reads (a Crock Pot
+-- dish carries `preparedfood`).
+local function CarryFood(target, prefab, count, foodtype, secondaryfoodtype, tags)
+    target.items[#target.items + 1] = StubItem(prefab, {
+        stackable = { StackSize = function() return count end },
+        edible = { foodtype = foodtype, secondaryfoodtype = secondaryfoodtype },
+    }, tags)
 end
 
 -- Signal an inventory change the way the game does and let the manager's
@@ -384,10 +396,12 @@ local function ValidateObjectiveFields(where, objective, index)
         Check(row .. " prefab filter is a prefab id", IsPrefabId(objective.prefab))
     end
 
-    -- `prefabs` is the multi-id form of a filter and only `plant` reads it,
-    -- so a list on any other type would silently match nothing.
+    -- `prefabs` is the multi-id form of a filter; `plant` and `collect_food`
+    -- read it (an allow-list), so a list on any other type would silently
+    -- match nothing.
     if objective.prefabs ~= nil then
-        Check(row .. " prefabs is only set on plant rows", objective.type == "plant")
+        Check(row .. " prefabs is only set on plant or collect_food rows",
+            objective.type == "plant" or objective.type == "collect_food")
         Check(row .. " does not set both prefab and prefabs", objective.prefab == nil)
         Check(row .. " prefabs is a non-empty table", type(objective.prefabs) == "table"
             and #objective.prefabs > 0)
@@ -395,6 +409,34 @@ local function ValidateObjectiveFields(where, objective, index)
             for i = 1, #objective.prefabs do
                 Check(string.format("%s prefabs[%d] is a prefab id", row, i),
                     IsPrefabId(objective.prefabs[i]))
+            end
+        end
+    end
+
+    -- `exclude` / `exclude_tags` are the negative filters `collect_food` reads
+    -- to drop VEGGIE-class items that are not vegetables (butterfly wings,
+    -- Crock Pot dishes). Another type would silently ignore them.
+    if objective.exclude ~= nil then
+        Check(row .. " exclude is only set on collect_food rows",
+            objective.type == "collect_food")
+        Check(row .. " exclude is a non-empty table",
+            type(objective.exclude) == "table" and #objective.exclude > 0)
+        if type(objective.exclude) == "table" then
+            for i = 1, #objective.exclude do
+                Check(string.format("%s exclude[%d] is a prefab id", row, i),
+                    IsPrefabId(objective.exclude[i]))
+            end
+        end
+    end
+    if objective.exclude_tags ~= nil then
+        Check(row .. " exclude_tags is only set on collect_food rows",
+            objective.type == "collect_food")
+        Check(row .. " exclude_tags is a non-empty table",
+            type(objective.exclude_tags) == "table" and #objective.exclude_tags > 0)
+        if type(objective.exclude_tags) == "table" then
+            for i = 1, #objective.exclude_tags do
+                Check(string.format("%s exclude_tags[%d] is a tag id", row, i),
+                    IsPrefabId(objective.exclude_tags[i]))
             end
         end
     end
@@ -1328,11 +1370,18 @@ Check("session save stores the fired set",
     type(session_save.fired_emergencies) == "table"
         and session_save.fired_emergencies["harness_emergency_health"] == true)
 
--- A shard migration is not a new session: `inst.migration` is what
--- player_common's OnPreLoad sets before the component loads.
+-- A live shard migration is not a new session: `inst.migration` is what
+-- player_common's OnPreLoad sets before the component loads, and the record
+-- names the source shard's world session -- which is the same value OnSave
+-- stamped into the save (`world_session`). `worldid` is the *other* shard.
+Check("save stamps the writing world session",
+    session_save.world_session == TheWorld.meta.session_identifier)
 local migrated_inst = NewInst(4003)
 SetHealth(migrated_inst, 100, 100)
-migrated_inst.migration = {}
+migrated_inst.migration = {
+    worldid = "HARNESS_OTHER_SHARD",
+    sessionid = TheWorld.meta.session_identifier,
+}
 Netvars.Attach(migrated_inst)
 local migrated_manager = Manager(migrated_inst)
 migrated_manager:OnLoad(session_save)
@@ -1343,6 +1392,43 @@ SetHealth(migrated_inst, 40, 100)
 migrated_inst:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
 Check("a shard migration suppresses a repeat",
     Read(migrated_inst)["guidedmissions.title"] == "Harness First")
+
+-- A save file can carry a *stale* migration payload. player_common writes
+-- `inst.migration` into the save, and playerspawner clears it only when it
+-- spawns the player -- so an entity that loaded but never spawned (a client
+-- rejected at the mod handshake, say) keeps it on disk. That record was written
+-- by a different shard than the one it names, so it is not a live transfer.
+local stale_inst = NewInst(4005)
+SetHealth(stale_inst, 100, 100)
+stale_inst.migration = {
+    worldid = "HARNESS_OTHER_SHARD",
+    sessionid = "SOME_PREVIOUS_SESSION",
+}
+Netvars.Attach(stale_inst)
+local stale_manager = Manager(stale_inst)
+stale_manager:OnLoad(session_save)
+Advance(1)
+Check("a stale migration record starts a new session",
+    next(stale_manager.fired_emergencies) == nil)
+SetHealth(stale_inst, 40, 100)
+stale_inst:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("a stale migration record re-arms the emergency",
+    Read(stale_inst)["guidedmissions.title"] == "Harness Emergency Health")
+
+-- A failed transfer can leave a record naming this very shard. The player is
+-- being restored where it was leaving, which is a relog, not a continuation.
+local failed_inst = NewInst(4006)
+SetHealth(failed_inst, 100, 100)
+failed_inst.migration = {
+    worldid = TheShard:GetShardId(),
+    sessionid = TheWorld.meta.session_identifier,
+}
+Netvars.Attach(failed_inst)
+local failed_manager = Manager(failed_inst)
+failed_manager:OnLoad(session_save)
+Advance(1)
+Check("a record naming this shard is not a live migration",
+    next(failed_manager.fired_emergencies) == nil)
 
 -- The same save loaded by a fresh join starts a new session and re-arms.
 local rejoined_inst = NewInst(4004)
@@ -2211,6 +2297,57 @@ type_fixtures.collect_food = function()
     CarryFood(filter_player, "berries_juicy", 1, "VEGGIE", "BERRY")
     InventoryChanged(filter_player)
     Check("juicy berries count", State(filter_player) == "won")
+
+    -- `exclude` drops prefabs vanilla files under VEGGIE that are not
+    -- vegetables (butterfly wings are FOODTYPE.VEGGIE in
+    -- prefabs/butterflywings.lua:39); `exclude_tags` drops Crock Pot dishes,
+    -- which are VEGGIE by main ingredient but carry `preparedfood`.
+    local veg_manager, veg_player = Spawn()
+    Activate(veg_manager, veg_player, {
+        id = "fixture_veggies",
+        title = "Garden",
+        subtext = "Things that grow.",
+        objectives = {
+            { type = "collect_food", foodtype = "VEGGIE", count = 2,
+              exclude = { "butterflywings" },
+              exclude_tags = { "preparedfood" },
+              label = "Collect veggies" },
+        },
+    })
+    CarryFood(veg_player, "butterflywings", 5, "VEGGIE", nil)
+    InventoryChanged(veg_player)
+    Check("excluded prefab does not count", Row(veg_player, 1)[3] == "0/2")
+    CarryFood(veg_player, "trailmix", 5, "VEGGIE", nil, { preparedfood = true })
+    InventoryChanged(veg_player)
+    Check("excluded tag does not count", Row(veg_player, 1)[3] == "0/2")
+    CarryFood(veg_player, "carrot", 2, "VEGGIE", nil)
+    InventoryChanged(veg_player)
+    Check("non-excluded veggie counts", State(veg_player) == "won")
+
+    -- `prefabs` is the positive counterpart: only the listed ids count, even
+    -- with no `foodtype` filter. This is how the veggies mission avoids
+    -- vanilla's over-broad VEGGIE class.
+    local list_manager, list_player = Spawn()
+    Activate(list_manager, list_player, {
+        id = "fixture_veggie_list",
+        title = "Garden List",
+        subtext = "Only these.",
+        objectives = {
+            { type = "collect_food", count = 2,
+              prefabs = { "carrot", "berries" },
+              label = "Collect veggies" },
+        },
+    })
+    CarryFood(list_player, "butterflywings", 5, "VEGGIE", nil)
+    InventoryChanged(list_player)
+    Check("prefab outside the allow-list does not count",
+        Row(list_player, 1)[3] == "0/2")
+    CarryFood(list_player, "carrot", 1, "VEGGIE", nil)
+    InventoryChanged(list_player)
+    Check("listed prefab counts", Row(list_player, 1)[3] == "1/2")
+    CarryFood(list_player, "berries", 1, "VEGGIE", "BERRY")
+    InventoryChanged(list_player)
+    Check("allow-list completes at target", State(list_player) == "won")
 end
 
 type_fixtures.plant = function()

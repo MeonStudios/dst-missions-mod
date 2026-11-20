@@ -196,6 +196,14 @@ A shard transfer is not a new session: moving to the caves and back keeps the fi
 set. Only a fresh join or a world load re-arms `session` mode. (`server` mode keeps the
 set across those too.)
 
+The player save carries `inst.migration` even for loads that are not a live transfer —
+an entity that loaded but never spawned (a client rejected at the mod handshake, a
+world shut down mid-transfer) keeps the engine's migration record on disk. So `OnLoad`
+does not trust that flag alone: the save also stores the writing shard's
+`TheWorld.meta.session_identifier`, and the fired set is kept only when it matches the
+`sessionid` in the migration record and the record names a different shard. A stale
+record therefore still starts a new session. See `dst-api.md` → *Shard migration*.
+
 The tracking is always **per player**, because every player progresses independently;
 "once per server" is not a group-wide one-shot. The option is server-side and read when
 the mod loads, so changing it needs a restart or a mod disable/enable.
@@ -219,8 +227,8 @@ included). A save during the 3-second recovered hold does record the id, because
 card had already resolved.
 
 The fired set is also written to the save in `session` mode, so it can cross a shard
-transfer; `OnLoad` then decides whether to keep it. In `always` mode the set is never
-saved at all.
+transfer; `OnLoad` then decides whether to keep it (see *Repeat frequency* above). In
+`always` mode the set is never saved at all.
 
 ## Adding a condition kind
 

@@ -73,12 +73,25 @@ The project is junctioned into the game's mods folder (created 2026-10-31), so e
 live in-game immediately:
 
 ```
-<steam>/mods/dst-mission-mod  ->  C:\Users\matti\Documents\Coding\Visual Studio Code projects\dst-mission-mod
+<steam>/mods/guided-missions-dev  ->  C:\Users\matti\Documents\Coding\Visual Studio Code projects\dst-mission-mod
 ```
 
 `<steam>` is `C:\Program Files (x86)\Steam\steamapps\common\Don't Starve Together`. If the
 junction is missing (e.g. after a reinstall), recreate it with `mklink /J` from an
 elevated prompt. It only helps this machine; other players need their own copy.
+
+The mod is also published on the Workshop, so the subscribed copy sits in
+`mods/workshop-<id>` alongside this junction. The game treats them as separate mods keyed
+by folder name; enable exactly one (both would run the mod twice). The junction's name
+`guided-missions-dev` is load-bearing: `modinfo.lua` appends `(dev)` to the display name
+for that folder only, because the Workshop uploader also executes `modinfo.lua` — with
+the repo's folder name — and must not publish the suffix. Servers match required mods to
+clients by **folder name + version**, so a dev-copy server only admits players whose copy
+is also `guided-missions-dev` at the same `version`; the Workshop subscription does not
+satisfy it. Publish with `ModUploader.exe` from *Don't Starve Mod Tools*; leave "Upload
+redundant files" unchecked, and check `%LOCALAPPDATA%\Don't Starve Mod Uploader\ModUploader.log`
+for what it skipped (it keeps `.md`/`docs`/`tests`). Details: `docs/dst-api.md` → *Mod
+loading*.
 
 - **Run every offline check at once** before asking the user to test in-game — syntax,
   l10n harness, l10n manifest, manager harness, modmain harness. Stops at the first

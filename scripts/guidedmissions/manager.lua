@@ -20,6 +20,17 @@ local function FindMissionIndexById(id)
     return nil
 end
 
+-- The shard's persistent world-session id (`TheWorld.meta.session_identifier`,
+-- generated at worldgen; the "Begin Session" value in the logs). It identifies
+-- the *shard*, not the server run, which is exactly what a migration record
+-- names in its `sessionid` field (components/playerspawner.lua:87-95). Comparing
+-- the two is how OnLoad tells a live shard transfer from a stale migration
+-- record left in a save file -- see OnLoad and docs/dst-api.md.
+local function WorldSessionId()
+    local world = GLOBAL.TheWorld
+    return world ~= nil and world.meta ~= nil and world.meta.session_identifier or nil
+end
+
 local function HasSurviveObjective(objectives)
     for _, objective in ipairs(objectives or {}) do
         if objective.type == "survive" then
@@ -862,7 +873,39 @@ function GuidedMissionManager:OnSave()
         -- or continues one. "always" remembers nothing.
         fired_emergencies = Settings.emergency_frequency ~= "always"
             and self.fired_emergencies or nil,
+        -- Stamp the record with the writing shard's world session id. On a live
+        -- migration this matches `data.migration.sessionid`; on a save file
+        -- that merely *contains* an old migration record it does not (see
+        -- OnLoad and docs/dst-api.md -> Shard migration).
+        world_session = WorldSessionId(),
     }
+end
+
+-- True only when this load is a transfer from a live source shard in the same
+-- session. `inst.migration` alone is not enough: player_common writes it back
+-- into the save (`data.migration = inst.migration`,
+-- prefabs/player_common.lua:1217), and an entity that loaded but never spawned
+-- (a client rejected at the mod handshake, or a shutdown mid-transfer) keeps it
+-- -- playerspawner clears it only when it spawns the player
+-- (components/playerspawner.lua:260). Such a file carries a stale migration
+-- payload, and a later fresh join would otherwise keep the previous session's
+-- fired set forever.
+--
+-- A live transfer is serialized by the source shard, so the record's own
+-- `world_session` stamp (written by OnSave) equals the `sessionid` the source
+-- put in the migration payload (playerspawner.lua:87-95). A stale record was
+-- written by a different shard, so the two differ. `worldid` must also name
+-- another shard: if it names this one the player is being restored to the shard
+-- it was leaving (a failed transfer), which is a relog, not a continuation.
+local function IsLiveMigration(inst, data)
+    local migration = inst.migration
+    local shard = GLOBAL.TheShard
+    return migration ~= nil
+        and shard ~= nil
+        and data.world_session ~= nil
+        and data.world_session == migration.sessionid
+        and migration.worldid ~= nil
+        and migration.worldid ~= shard:GetShardId()
 end
 
 function GuidedMissionManager:OnLoad(data)
@@ -881,16 +924,19 @@ function GuidedMissionManager:OnLoad(data)
 
     -- "server" keeps the fired set across any load. "session" re-arms on a
     -- fresh join or world load, but keeps it through a shard migration: moving
-    -- to the caves and back is still one session. The engine marks a migration
-    -- on `inst.migration` during OnPreLoad, which runs before component OnLoad
+    -- to the caves and back is still one session. `inst.migration` marks a
+    -- migration during OnPreLoad, which runs before component OnLoad
     -- (scripts/prefabs/player_common.lua:1257; scripts/entityscript.lua:1988
-    -- vs :2005 -- see docs/dst-api.md).
+    -- vs :2005) -- but on its own it is not proof of a *live* transfer: see
+    -- IsLiveMigration.
     self.fired_emergencies = {}
-    if type(data.fired_emergencies) == "table"
-        and (Settings.emergency_frequency == "server"
-            or (Settings.emergency_frequency == "session"
-                and self.inst.migration ~= nil)) then
-        self.fired_emergencies = data.fired_emergencies
+    if type(data.fired_emergencies) == "table" then
+        if Settings.emergency_frequency == "server" then
+            self.fired_emergencies = data.fired_emergencies
+        elseif Settings.emergency_frequency == "session"
+            and IsLiveMigration(self.inst, data) then
+            self.fired_emergencies = data.fired_emergencies
+        end
     end
 
     -- Prefer the stable mission id so reordering missions.lua does not

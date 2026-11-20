@@ -3,6 +3,18 @@ description = "Information-only mission chains that guide players through a play
 author = "PinkNeonDino"
 version = "0.1.0"
 
+-- The game keys mods by folder name under mods/: the subscribed Workshop copy is
+-- mods/workshop-<id>, the in-game dev junction is mods/guided-missions-dev, and the
+-- repo itself is dst-mission-mod. modindex.lua:601 passes that name in as
+-- `folder_name`, which lets the dev junction label itself in the Mods menu and in
+-- the server's "requires mods" dialog.
+-- Match one exact name, not "not workshop-": ModUploader.exe also executes this file,
+-- with the *uploaded* folder's name (the repo, dst-mission-mod), so a general check
+-- would rename the published Workshop item to "Guided Missions (dev)".
+if folder_name == "guided-missions-dev" then
+    name = name .. " (dev)"
+end
+
 -- Mods-menu icon. `icon_atlas` is a path from the mod root; `icon` is the
 -- Element name inside that atlas (not a path — modindex.lua resolves the .tex
 -- in the atlas's directory). Both files must exist or the game clears the

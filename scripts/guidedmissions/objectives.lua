@@ -59,8 +59,10 @@ end
 
 -- Optional prefab filter: `prefab` names one id, `prefabs` accepts any in a
 -- list, and neither accepts anything. Used where several kinds of item are the
--- same intent (`plant` rows: a normal or juicy berry bush). Only `plant` reads
--- `prefabs` today; mission data is validated accordingly.
+-- same intent (`plant` rows: a normal or juicy berry bush; `collect_food` rows:
+-- an allow-list of produce, since FOODTYPE.VEGGIE also covers non-vegetables).
+-- `plant` and `collect_food` read `prefabs`; mission data is validated
+-- accordingly.
 local function MatchesPrefabFilter(objective, prefab)
     if objective.prefabs ~= nil then
         for i = 1, #objective.prefabs do
@@ -355,8 +357,34 @@ local function MatchesFoodType(objective, edible)
     return true
 end
 
+-- Vanilla's `FOODTYPE.VEGGIE` is a cooking classification, not a claim that the
+-- item is a vegetable: butterfly wings, petals, lightbulbs, foliage and dried
+-- plants are all VEGGIE, and every Crock Pot dish made with vegetables is
+-- tagged `preparedfood` as well as VEGGIE (prefabs/preparedfoods.lua:73). A row
+-- that means "gather vegetables" drops those with `exclude` (prefab ids) and/or
+-- `exclude_tags` (entity tags) so they cannot satisfy it.
+local function IsExcludedFood(objective, item)
+    if objective.exclude ~= nil then
+        for i = 1, #objective.exclude do
+            if objective.exclude[i] == item.prefab then
+                return true
+            end
+        end
+    end
+    if objective.exclude_tags ~= nil then
+        for i = 1, #objective.exclude_tags do
+            if item:HasTag(objective.exclude_tags[i]) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
 -- Any item with an edible component counts as food, cooked or raw. The optional
--- `foodtype` / `secondaryfoodtype` fields narrow it.
+-- `foodtype` / `secondaryfoodtype` fields narrow it, `prefabs` is an allow-list
+-- of item ids, and `exclude` / `exclude_tags` drop items that match those
+-- filters but are not the intended food.
 function Objectives.CountFoodInInventory(inst, objective)
     local inventory = inst.components.inventory
     if inventory == nil then
@@ -367,7 +395,9 @@ function Objectives.CountFoodInInventory(inst, objective)
     inventory:ForEachItem(function(item)
         local components = item.components
         local edible = components ~= nil and components.edible or nil
-        if edible ~= nil and MatchesFoodType(objective, edible) then
+        if edible ~= nil and MatchesPrefabFilter(objective, item.prefab)
+            and MatchesFoodType(objective, edible)
+            and not IsExcludedFood(objective, item) then
             local stackable = components.stackable
             count = count + (stackable ~= nil and stackable:StackSize() or 1)
         end

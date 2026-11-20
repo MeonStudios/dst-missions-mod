@@ -144,7 +144,12 @@ types are strings: berries are main type `VEGGIE` with secondary type `BERRY`, a
 `{ type = "collect_food", count = 3, secondaryfoodtype = "BERRY" }` counts either berry
 variety.
 `foodtype = "VEGGIE"` is broader: it counts carrots, berries, mushrooms, corn, and every
-other vegetable, so it cannot isolate "berries or carrots" on its own. With neither filter,
+other vegetable, so it cannot isolate "berries or carrots" on its own. It also counts
+items vanilla merely *cooks* as vegetables — butterfly wings, petals, lightbulbs, and
+every veggie Crock Pot dish. For a narrower set, give `prefabs` (an allow-list of item
+ids) instead of `foodtype`. To keep the broad type but drop specific items, use
+`exclude` (prefab ids) and `exclude_tags` (entity tags;
+`exclude_tags = { "preparedfood" }` removes all Crock Pot dishes). With neither filter,
 any food counts.
 
 `cook` counts successful cooking on a **fire** (campfire, firepit, lighter) — the mod hooks

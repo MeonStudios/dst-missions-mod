@@ -718,14 +718,34 @@ Hold `count` edible items, optionally of a food type.
 | Field | Required | Default |
 |---|---|---|
 | `count` | yes | — |
+| `prefabs` | no | any |
 | `foodtype` | no | any |
 | `secondaryfoodtype` | no | any |
+| `exclude` | no | — |
+| `exclude_tags` | no | — |
 | `icon` | no | — |
 
 - **Completes when:** peak holdings reach `count` edible items (raw or cooked, stack
   sizes counted). Same never-decreases rule as `collect`.
-- **Matching:** any inventory item with an `edible` component whose
-  `foodtype`/`secondaryfoodtype` equal the given strings exactly.
+- **Matching:** any inventory item with an `edible` component whose prefab is in
+  `prefabs` (when given) and whose `foodtype`/`secondaryfoodtype` equal the given
+  strings exactly, unless the item is dropped by `exclude`/`exclude_tags`.
+- **Allow-list:** `prefabs` names the item ids that count, like the same field on
+  `plant`. It combines with `foodtype` when both are given. Prefer it over
+  `foodtype` when the mission's wording is narrower than vanilla's classification
+  — see **Exclusions**.
+- **Exclusions:** `exclude` is a list of prefab ids and `exclude_tags` a list of
+  entity tags; an item matching either is not counted. Use them when vanilla's
+  `FOODTYPE` classification is broader than the mission's wording.
+  `foodtype = "VEGGIE"` is the main offender: butterfly wings, moon butterfly
+  wings, petals, lightbulbs, foliage, cut lichen and dried plants are all VEGGIE
+  (`prefabs/butterflywings.lua:39`, `prefabs/petals.lua:89`,
+  `prefabs/lightbulb.lua:69`, ...), as is every Crock Pot dish whose main
+  ingredient is a vegetable — those carry the `preparedfood` tag
+  (`prefabs/preparedfoods.lua:73`), so `exclude_tags = { "preparedfood" }`
+  drops all of them at once. Seasonal event foods (Halloween candy, Winter's
+  Feast, carnival corn tea) are VEGGIE too and are not output by the tag, so
+  list them by prefab if they matter.
 - **Food type values** (`constants.lua:2026-2047`): `GENERIC`, `MEAT`, `VEGGIE`,
   `ELEMENTAL`, `GEARS`, `HORRIBLE`, `INSECT`, `SEEDS` (plural), `BERRY`, `RAW`,
   `BURNT`, `NITRE`, `ROUGHAGE`, `WOOD`, `GOODIES`, `MONSTER`, `LUNAR_SHARDS`,
@@ -733,13 +753,20 @@ Hold `count` edible items, optionally of a food type.
   `berries` and `berries_juicy` (and their cooked forms) match
   `secondaryfoodtype = "BERRY"`.
 - **Icon:** none by default; set `icon`.
-- **No `prefab`:** this type has no prefab field; the validator rejects one. Use
-  `eat` or `collect` for a specific item.
+- **No singular `prefab`:** use `prefabs` for one id or several; the validator
+  rejects `prefab`. Use `eat` or `collect` for a specific item.
 - **Traps:** `foodtype = "VEGGIE"` also counts carrots, mushrooms, corn and every
-  other vegetable, so it cannot isolate "berries or carrots" by itself.
+  other vegetable, so it cannot isolate "berries or carrots" by itself. See
+  **Exclusions** for the non-vegetables it also counts.
 
 ```lua
 { type = "collect_food", count = 3, foodtype = "VEGGIE", secondaryfoodtype = "BERRY", label = "Collect berries", icon = "berries" }
+{ type = "collect_food", count = 5, label = "Collect veggies",
+  prefabs = { "carrot", "carrot_cooked", "berries", "berries_cooked",
+              "red_cap", "red_cap_cooked" } }
+{ type = "collect_food", count = 5, foodtype = "VEGGIE", label = "Collect any veggie",
+  exclude = { "butterflywings", "petals", "lightbulb" },
+  exclude_tags = { "preparedfood" } }
 ```
 
 ### `cook`
@@ -869,7 +896,7 @@ Show an informational row that never completes.
 | Type | Server signal | Compared value |
 |---|---|---|
 | `collect` | inventory event, reread next tick | inventory prefab + stack size (peak) |
-| `collect_food` | inventory event, reread next tick | `edible` component + stack size (peak) |
+| `collect_food` | inventory event, reread next tick | `edible` component + stack size (peak), limited by `prefabs`, minus `exclude`/`exclude_tags` |
 | `survive` | 1 s poll | world day (`cycles + 1`) |
 | `craft` | `builditem`, plus inventory event reread | `data.recipe.name` or `data.item.prefab`; inventory prefab + stack size (peak) |
 | `build` | `buildstructure`, plus a 1 s poll for `shared` rows | `data.recipe.name` or `data.item.prefab`; nearby `structure` entities matching `prefab` |

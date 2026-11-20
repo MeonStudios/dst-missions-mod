@@ -106,7 +106,18 @@ return {
         subtext = "Veggies: now with 100% more fire.",
         hint = "Berries, carrots and mushrooms count as veggies.",
         objectives = {
-            { type = "collect_food", foodtype = "VEGGIE", count = 5, label = "Collect veggies" },
+            { type = "collect_food", count = 5,
+              prefabs = {
+                  "carrot", "carrot_cooked",
+                  "berries", "berries_cooked",
+                  "berries_juicy", "berries_juicy_cooked",
+                  "red_cap", "red_cap_cooked",
+                  "green_cap", "green_cap_cooked",
+                  "blue_cap", "blue_cap_cooked",
+                  "cactus_meat", "cactus_meat_cooked",
+                  "mandrake", "cookedmandrake",
+              },
+              label = "Collect veggies" },
             { type = "cook", count = 2, label = "Cook items" },
         },
     },
@@ -120,10 +131,7 @@ return {
               overrides = {
                   wathgrithr = { type = "craft", prefab = "healingsalve", count = 1, label = "Craft a Healing Salve" },
                   warly = { type = "eat", prefab = "trailmix", count = 1, label = "Eat Trail Mix" },
-                  -- Wormwood heals by fertilizing himself (Rot, Manure, Guano,
-                  -- Bucket-o'-Poop); any fertilizer counts.
-                  wormwood = { type = "fertilize", self = true, count = 1,
-                               label = "Fertilize yourself" },
+                  wormwood = { type = "fertilize", self = true, count = 1, label = "Fertilize yourself" },
               } },
             { type = "heal", count = 10, label = "Restore at least 10 health" },
         },
@@ -203,7 +211,7 @@ return {
         objectives = {
             { type = "craft", prefab = "shovel", count = 1, label = "Craft a Shovel" },
             { type = "plant", prefabs = { "dug_berrybush", "dug_berrybush2", "dug_berrybush_juicy" }, count = 1, label = "Replant a berry bush" },
-            { type = "fertilize", count = 1, label = "Fertilize your bush" },
+            { type = "fertilize", count = 1, label = "Fertilize your bush", icon = "spoiled_food" },
         },
     },
     {
