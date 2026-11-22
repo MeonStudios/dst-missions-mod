@@ -12,7 +12,30 @@
 -- thresholds use degrees (for example "<0" for freezing, ">70" for overheating)
 -- and may be negative.
 
+local GLOBAL = _G
+
 local Conditions = {}
+
+-- World settings mission data may gate a row on (`when = { setting = ... }`).
+-- Validated in tests/manager_test.lua so a typo hides a row silently rather
+-- than loudly.
+Conditions.VALID_WORLD_SETTINGS = {
+    portal_rez = true,
+}
+
+-- Read one world setting from the shard's worldsettings component. The stored
+-- values are plain booleans for the options this mod gates on (see
+-- docs/dst-api.md, "Player death, ghosts and revival"). Returns nil when the
+-- world, the component or the setting is missing; never errors.
+function Conditions.GetWorldSetting(name)
+    local world = GLOBAL.TheWorld
+    local settings = world ~= nil and world.components ~= nil
+        and world.components.worldsettings or nil
+    if name == nil or settings == nil or settings.GetSetting == nil then
+        return nil
+    end
+    return settings:GetSetting(name)
+end
 
 Conditions.VALID_STATS = {
     health = true,

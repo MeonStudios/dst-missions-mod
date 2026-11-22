@@ -89,6 +89,18 @@ function Objectives.IsShared(objective)
     return objective.shared == true
 end
 
+-- A row may be gated on a world setting (`when = { setting = "portal_rez" }`).
+-- The manager drops an unavailable row before writing the netvar, so a client
+-- never draws it. Validated to optional rows only: a hidden required row would
+-- leave a mission with no visible goal to complete.
+function Objectives.IsAvailable(objective)
+    local when = objective ~= nil and objective.when or nil
+    if when == nil then
+        return true
+    end
+    return Conditions.GetWorldSetting(when.setting) == true
+end
+
 -- Character overrides. A row may name a replacement goal per character prefab
 -- (`overrides = { wathgrithr = {...} }`) for a goal that character cannot
 -- complete: Wigfrid and Warly refuse vegetable food and Wickerbottom cannot
@@ -115,7 +127,10 @@ function Objectives.ForCharacter(objective, prefab)
     for key, value in pairs(override) do
         row[key] = value
     end
+    -- Slot-level properties belong to the row, not the goal: an override keeps
+    -- the base row's optionality and world gate.
     row.optional = objective.optional
+    row.when = objective.when
     return row
 end
 
@@ -137,6 +152,13 @@ end
 -- text: the client formats the day counter in its own language from the numbers
 -- GetCounterMeta supplies (see FormatRows in manager.lua).
 function Objectives.GetCounter(objective, progress)
+    if objective.type == "tip" then
+        -- A tip is guidance, not a goal: it has no progress and never
+        -- completes, so it carries no counter. The tracker leaves the right
+        -- side of the row empty.
+        return ""
+    end
+
     if objective.type == "survive" then
         local target = tonumber(objective.day) or 1
         return string.format(Strings.DAY_COUNTER_FMT, Objectives.GetCurrentDay(), target)
@@ -183,6 +205,12 @@ function Objectives.GetIconPrefab(objective)
         -- A tip has no prefab, so it draws nothing unless the mission names an
         -- icon (`stand under a tree` has no item art to fall back on).
         return objective.icon
+    end
+    if objective.type == "haunt" then
+        -- The haunted object's own art. A `tag` filter has no single prefab to
+        -- draw, so such a row names `icon` explicitly (the portal, for example,
+        -- has no inventory image and uses a world anim in the tracker).
+        return objective.icon or objective.prefab
     end
     if objective.type == "reach_stat" then
         -- The same HUD badge glyphs the heal/sanity rows use, chosen by stat.
@@ -673,6 +701,22 @@ function Objectives.GetEventIncrement(objective, event, data, inst)
             and (objective.prefab == nil or data.prefab == objective.prefab) then
             return 1
         end
+    elseif event == "haunt" then
+        -- Pushed on the haunter by ACTIONS.HAUNT.fn before the haunted object's
+        -- own effect runs (actions.lua:3154-3164). `prefab` matches one id; a
+        -- `tag` accepts several (the Florid Postern and its Celestial Portal
+        -- upgrade both carry `multiplayer_portal`).
+        local target = data.target
+        if objective.type == "haunt" and target ~= nil then
+            if objective.prefab ~= nil then
+                if target.prefab == objective.prefab then
+                    return 1
+                end
+            elseif objective.tag ~= nil and target.HasTag ~= nil
+                and target:HasTag(objective.tag) then
+                return 1
+            end
+        end
     elseif event == "killed" then
         local victim = data.victim
         if objective.type == "kill" and victim ~= nil and victim.prefab == objective.prefab then
@@ -825,6 +869,7 @@ Objectives.VALID_TYPES = {
     reach_stat = true,
     equip = true,
     tip = true,
+    haunt = true,
 }
 
 return Objectives

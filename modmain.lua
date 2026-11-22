@@ -9,14 +9,17 @@ local MissionNetvars = require("guidedmissions/netvars")
 local Settings = require("guidedmissions/settings")
 
 -- The tracker draws world animations for rows whose subject has no inventory
--- art: the flower for pick rows, and the normal tree for `tip` rows that point
--- at `evergreen_normal` (a tree's bank and build live in separate files). The
--- client needs these vanilla anims loaded; HUD widgets do not inherit a
--- prefab's asset list.
+-- art: the flower for pick rows, the normal tree for `tip` rows that point at
+-- `evergreen_normal` (a tree's bank and build live in separate files), and the
+-- two revive targets that have no item art -- the Florid Postern and the Touch
+-- Stone. The client needs these vanilla anims loaded; HUD widgets do not
+-- inherit a prefab's asset list.
 Assets = {
     Asset("ANIM", "anim/flowers.zip"),
     Asset("ANIM", "anim/evergreen_new.zip"),          -- build
     Asset("ANIM", "anim/evergreen_short_normal.zip"), -- bank + animations
+    Asset("ANIM", "anim/portal_stone.zip"),           -- Florid Postern
+    Asset("ANIM", "anim/resurrection_stone.zip"),     -- Touch Stone
 }
 
 Settings.show_tracker = GetModConfigData("SHOW_TRACKER") ~= false

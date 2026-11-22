@@ -56,6 +56,7 @@ Supported objective types:
 | `cook`    | `count`, optional `prefab` | the player cooks `count` food items on a fire |
 | `cookpot` | `count`, optional `prefab` | the player starts cooking `count` dishes in a Crock Pot (optional dish filter) |
 | `prototype` | `count`, optional `prefab` (a recipe id) | the player learns `count` new recipes (station prototyping or blueprints) |
+| `haunt` | one of `prefab` or `tag`, optional `count`, optional `icon` | the ghost haunts `count` matching world objects (the Florid Postern, a Touch Stone, a dropped Life Giving Amulet) |
 | `tip` | optional `icon` | never — an informational row, always optional, that shows a hint without a goal |
 
 `hint` is optional: hovering the "?" button in the card's title band shows it in a
@@ -194,10 +195,14 @@ equipped when the mission starts counts immediately.
 
 Separate from the ordered chain, the mod can pop up a guidance card when a player's
 health, sanity or hunger drops below a threshold, wetness climbs too high, the player
-freezes or overheats, or when a hound wave begins (triggered by the first warning bark,
-and cleared once no wave hounds are left nearby). It replaces the current mission card
-and resolves automatically; the interrupted mission keeps its progress and resumes
-exactly where it was.
+freezes or overheats, when a hound wave begins (triggered by the first warning bark,
+and cleared once no wave hounds are left nearby), at the start of a chosen world day
+(cleared when a named creature dies, by any hand, or when it leaves/despawns), when the
+player becomes a ghost (listing the ways back), or when a living player stands next to
+a ghost friend (suggesting a Telltale Heart or a dropped Life Giving Amulet). It
+replaces the current mission card and resolves automatically; the interrupted mission
+keeps its progress and resumes exactly where it was. Emergencies fire wherever they
+apply — before the first mission, between missions, and after the chain is done.
 
 Emergencies live in
 [`scripts/guidedmissions/emergencies.lua`](scripts/guidedmissions/emergencies.lua):
@@ -219,10 +224,13 @@ Emergencies live in
 Thresholds are strings so inclusivity is explicit: `"<50"` is below 50%, `"<=50"`
 includes 50, `">=75"` includes 75 and above. A stat emergency has one required goal row
 matching its resolve threshold; a hound-wave emergency (`trigger = { kind = "hounds",
-state = "warning" }`) has only optional rows. Both end on their condition, never on
-objective completion. **Mods → Configure → Emergency Repeat** controls whether the same
-emergency may fire every time, once per session (default), or once per server/world —
-per player. The full schema is in [`docs/emergencies.md`](docs/emergencies.md).
+state = "warning" }`) or a day-based one (`trigger = { kind = "cycle", day = 30, boss =
+"deerclops" }` with `resolve = { kind = "kill", prefab = "deerclops", or_gone = true }`)
+has only optional rows. All end on their condition, never on objective completion.
+**Mods → Configure → Emergency Repeat**
+controls whether the same emergency may fire every time, once per session (default), or
+once per server/world — per player. The full schema is in
+[`docs/emergencies.md`](docs/emergencies.md).
 
 ## Localization
 
@@ -291,6 +299,9 @@ items.
 - A low-health, low-sanity or low-hunger, high-wetness, freezing/overheating
   **emergency** (or a hound-wave warning) can replace the card; it resolves by itself
   when the danger passes, and the interrupted mission resumes with its progress intact.
+  Dying swaps in a card with every way back (Florid Postern where the world allows it,
+  Touch Stone, Life Giving Amulet, Meat Effigy, a friend's Telltale Heart), and a
+  living player beside a ghost gets a card suggesting how to help.
 - With **Multiplayer Mode** on, a shared `build` objective (a fire pit, Science
   Machine, and so on) checks if that structure already stands near you, so one player's
   build serves the group. Every player still has their own mission progress.
@@ -321,8 +332,10 @@ items.
 - The tracker can only be dragged with the mouse (hover focus is mouse-only), so
   controller-only players keep the default spot beside the status badges.
 - Completion is announced globally, with no per-player popup.
-- Emergency objectives are all optional, so every emergency row sits under the
-  `Optional` heading.
+- Emergency guidance rows are optional and sit under the `Optional` heading. A stat
+  emergency's one goal row is required and checks when its resolve threshold is met;
+  the death card's rows are all optional guidance (the postern row checks if that is
+  how the player got back).
 - "Once per server" emergency tracking is per player, not shared by the group.
 - Chat and log lines follow the server language; only the HUD follows each client.
 - Japanese is shipped but dormant until DST enables its `ja` locale; other unshipped

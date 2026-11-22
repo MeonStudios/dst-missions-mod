@@ -86,6 +86,10 @@ local ITEM_ATLAS = {
     campfire = "images/inventoryimages1.xml",
     tent = "images/inventoryimages3.xml",
     siestahut = "images/inventoryimages3.xml",
+    -- The death card's item rows.
+    amulet = "images/inventoryimages1.xml",
+    resurrectionstatue = "images/inventoryimages3.xml",
+    reviver = "images/inventoryimages3.xml",
 }
 
 function GetInventoryItemAtlas(tex)
@@ -672,16 +676,16 @@ local CASES = {
         },
     },
     {
-        -- A `tip` row: optional by default, a normal 0/1 counter, no icon. It
-        -- must not blank the counter: an empty counter breaks the HUD's row
-        -- layout (labels stop rendering).
+        -- A `tip` row: optional by default, no counter, no icon. The empty
+        -- counter is guarded (GetRegionSize nil reads as 0), so the label
+        -- extends to the right edge instead of leaving a 0/1 slot unused.
         "tip_2row",
         {
             title = "Under the Boughs",
             subtext = "Trees keep the rain off.",
             rows = table.concat({
                 ROW("Collect flint", "flint", "1/3"),
-                ROW("Stand under a tree", "", "0/1", false, true),
+                ROW("Stand under a tree", "", "", false, true),
             }, ";"),
             state = "active",
         },
@@ -742,6 +746,42 @@ local CASES = {
             rows = table.concat({
                 ROW("Get back to 75% health", "heart", "40/75%"),
                 ROW("Eat a butterfly wing", "butterflywings", "0/1", false, true),
+            }, ";"),
+            state = "emergency",
+        },
+    },
+    {
+        -- The death card with portal resurrection on: five rows, all optional.
+        -- The postern and Touch Stone use world-anim icons (laid out by the
+        -- tracker, not painted by the preview); the other three are item art.
+        "death_5row",
+        {
+            title = "Restless Spirit",
+            subtext = "You're a ghost. Any one of these can revive you.",
+            hint = "Effigies show a revive button above your health badge. Hearts need a friend.",
+            rows = table.concat({
+                ROW("Haunt the Florid Postern", "multiplayer_portal", "0/1", false, true),
+                ROW("Haunt a Touch Stone", "resurrectionstone", "0/1", false, true),
+                ROW("Haunt a Life Giving Amulet", "amulet", "0/1", false, true),
+                ROW("Activate your Meat Effigy", "resurrectionstatue", "", false, true),
+                ROW("Have a friend revive you", "reviver", "", false, true),
+            }, ";"),
+            state = "emergency",
+        },
+    },
+    {
+        -- The same card in a world without portal resurrection: the gated row
+        -- is absent, as the server would send it.
+        "death_4row",
+        {
+            title = "Restless Spirit",
+            subtext = "You're a ghost. Any one of these can revive you.",
+            hint = "Effigies show a revive button above your health badge. Hearts need a friend.",
+            rows = table.concat({
+                ROW("Haunt a Touch Stone", "resurrectionstone", "0/1", false, true),
+                ROW("Haunt a Life Giving Amulet", "amulet", "0/1", false, true),
+                ROW("Activate your Meat Effigy", "resurrectionstatue", "", false, true),
+                ROW("Have a friend revive you", "reviver", "", false, true),
             }, ";"),
             state = "emergency",
         },
@@ -897,6 +937,64 @@ local CASES = {
             subtext = "The dark is not your friend. Probably.",
             rows = ROW("Survive the first night", "", "Day 1/3", false, false, "day", "1", "3"),
             state = "active",
+        },
+        false,
+        false,
+        "zh",
+    },
+    -- The death card in translation. The German card has all five rows (portal
+    -- resurrection on); the Russian and Chinese ones have four, as a survival
+    -- world would send them.
+    {
+        "de_death_5row",
+        {
+            title = "Restless Spirit",
+            subtext = "You're a ghost. Any one of these can revive you.",
+            hint = "Effigies show a revive button above your health badge. Hearts need a friend.",
+            rows = table.concat({
+                ROW("Haunt the Florid Postern", "multiplayer_portal", "0/1", false, true),
+                ROW("Haunt a Touch Stone", "resurrectionstone", "0/1", false, true),
+                ROW("Haunt a Life Giving Amulet", "amulet", "0/1", false, true),
+                ROW("Activate your Meat Effigy", "resurrectionstatue", "", false, true),
+                ROW("Have a friend revive you", "reviver", "", false, true),
+            }, ";"),
+            state = "emergency",
+        },
+        false,
+        false,
+        "de",
+    },
+    {
+        "ru_death_4row",
+        {
+            title = "Restless Spirit",
+            subtext = "You're a ghost. Any one of these can revive you.",
+            hint = "Effigies show a revive button above your health badge. Hearts need a friend.",
+            rows = table.concat({
+                ROW("Haunt a Touch Stone", "resurrectionstone", "0/1", false, true),
+                ROW("Haunt a Life Giving Amulet", "amulet", "0/1", false, true),
+                ROW("Activate your Meat Effigy", "resurrectionstatue", "", false, true),
+                ROW("Have a friend revive you", "reviver", "", false, true),
+            }, ";"),
+            state = "emergency",
+        },
+        false,
+        false,
+        "ru",
+    },
+    {
+        "zh_death_4row",
+        {
+            title = "Restless Spirit",
+            subtext = "You're a ghost. Any one of these can revive you.",
+            hint = "Effigies show a revive button above your health badge. Hearts need a friend.",
+            rows = table.concat({
+                ROW("Haunt a Touch Stone", "resurrectionstone", "0/1", false, true),
+                ROW("Haunt a Life Giving Amulet", "amulet", "0/1", false, true),
+                ROW("Activate your Meat Effigy", "resurrectionstatue", "", false, true),
+                ROW("Have a friend revive you", "reviver", "", false, true),
+            }, ";"),
+            state = "emergency",
         },
         false,
         false,

@@ -37,6 +37,10 @@ processes, takes minutes, and is the slowest way to answer anything.
 | `AddPlayerPostInit`, `AddPrefabPostInit`, `GetModConfigData` | `scripts/modutil.lua` |
 | Player event sources | `scripts/components/inventory.lua`, `builder.lua`, `combat.lua` |
 | Hound waves and the bark warning | `scripts/components/hounded.lua` (read `GetWarning`/`GetAttacking`), `scripts/prefabs/hound.lua` (the `hound` tag) |
+| Every entity death, whoever killed it | `scripts/components/health.lua` (`Health:SetVal` pushes `entity_death` on TheWorld) |
+| A boss leaving / despawning | `scripts/prefabs/deerclops.lua` (`hasslerremoved`, `storehassler` on TheWorld) |
+| Is a boss enabled in this world | `scripts/worldsettings_overrides.lua` (`applyoverrides_pre.deerclops` sets `TUNING.SPAWN_DEERCLOPS`) |
+| Reacting to a new world day | `scripts/components/clock.lua` (`cycleschanged`), `scripts/components/worldstate.lua` (`WatchWorldState` / `AddWatcher`) |
 | Equipment slots and equip events | `scripts/components/inventory.lua` (`equipslots`, `equip`/`unequip`), `equippable.lua`, `weapon.lua`, `tool.lua`, `armor.lua` |
 | Hunger stat and `hungerdelta` | `scripts/components/hunger.lua` |
 | Wetness (moisture) and temperature | `scripts/components/moisture.lua`, `scripts/components/temperature.lua` |
@@ -342,7 +346,9 @@ Verified 2026-11-20 against the installed scripts.
     `hunger.current / hunger.max`, `moisture.moisture / moisture.maxmoisture`, and
     `temperature.current` (a raw degree reading, not a percentage). All are plain
     numbers. `Health:IsDead()` is `currenthealth <= 0`
-    (`components/health.lua:546-548`); use it to skip dead/ghost players.
+    (`components/health.lua:546-548`). It does **not** identify a player ghost:
+    becoming a ghost resets health to 50 (see "Player death, ghosts and revival"
+    below), so use the `playerghost` tag for ghosts.
     `Health:SetPercent(percent)` is `components/health.lua:550-553` and
     `Sanity:SetPercent(percent)` is `components/sanity.lua:302-306`. The debug commands
     `c_sethealth(n)` / `c_setsanity(n)` (`consolecommands.lua:388-393` / `:404-409`)
@@ -880,6 +886,21 @@ Verified 2026-11-19 against `components/deployable.lua` and
 - `TheWorld.components.worldstate:GetWorldAge()` returns `1 + cycles + time`, a float
   where `time` is the fraction of the current day.
 - Use `cycles + 1` for "reach day N" objectives.
+- **A new day is announced by `cycleschanged`.** `components/clock.lua:391` pushes
+  `TheWorld:PushEvent("cycleschanged", <new cycles>)` when the clock advances into the
+  day phase (`:354-357`). `components/worldstate.lua:59-61` listens to it and stores
+  `self.data.cycles`, then invokes its watchers. So a watcher (or a listener registered
+  after worldstate, which is every mod) sees the updated `TheWorld.state.cycles`.
+- **`EntityScript:WatchWorldState(var, fn)`** (`entityscript.lua:1290-1293`) is the
+  sanctioned way to react to a state change: it registers with
+  `TheWorld.components.worldstate:AddWatcher` (`worldstate.lua:280-289`), which calls
+  `fn(entity, newvalue)` *after* assigning `self.data[var]`
+  (`worldstate.lua:24-31`). It is removed automatically when the entity is removed
+  (`entityscript.lua:1744` calls `StopAllWatchingWorldStates`). This mod uses
+  `WatchWorldState("cycles", ...)` in `manager.lua` to pop `cycle` emergencies at dawn.
+- `ms_cyclecomplete` is also pushed (`clock.lua:356`), but **before** `state.cycles`
+  updates, so its payload is the only trustworthy day value at that moment. Prefer
+  `cycleschanged` / `WatchWorldState` when the handler reads world state.
 
 ## Shard migration and player save/load (verified)
 
@@ -973,6 +994,130 @@ Verified 2026-11-14 against `scripts/components/hounded.lua` and
   The `houndwarning` listener in `manager.lua` only makes the pop immediate; the condition
   itself reads world state.
 
+## Entity death (verified 2026-11-21)
+
+- **`Health:SetVal` pushes `entity_death` on the world** the moment health crosses from
+  above 0 to 0 or below (`components/health.lua:585-591`):
+  `TheWorld:PushEvent("entity_death", { inst = <victim>, cause, afflicter, corpsing })`.
+  It is pushed **before** the victim's own `death` event and before the fade-out task,
+  so a handler can still read the entity. It covers every entity with a health
+  component, on the server only (health is server-authoritative; replicas do not run
+  `SetVal`).
+- **No killer is required.** `afflicter` is whatever dealt the damage (a player, a
+  tentacle, a hound), and `cause` is its prefab name or `"NIL"`; starvation, fire,
+  drowning and a `Remove`-after-0-health all still push the event. This is the event to
+  use for "the creature died, by anything".
+- **`killed` is not a death log.** `components/combat.lua:678-683` pushes
+  `attacker:PushEvent("killed", { victim, attacker, from_doattack })` only when combat's
+  attacker is non-nil, and only on that one entity. It cannot see a death by fire,
+  starvation or the environment. `entity_death` can.
+- **Boss removals push their own world events.** Deerclops's prefab pushes
+  `hasslerkilled` on TheWorld from `OnDead` (`prefabs/deerclops.lua:248`), and
+  `hasslerremoved` from `OnRemove` (`:238`). Unlike `entity_death`, the payload of both
+  is **the entity itself**, not a data table (`TheWorld:PushEvent("hasslerremoved", inst)`).
+  `hasslerremoved` fires on any removal: after a kill's fade-out, at a despawn, or an
+  admin removal. `storehassler` (`:164`, `:173`) is pushed just before a *leave* (winter's
+  end, or `WantsToLeave`), carrying the entity; the entity is then removed and
+  `hasslerremoved` follows. Together they distinguish "left" from "killed" if needed;
+  `hasslerremoved` alone covers "gone either way".
+- These boss events are not a general hook — a plain creature does not push them; use
+  `entity_death` for anything generic.
+- This mod's manager listens for the world's `entity_death` (and `hasslerremoved`) while
+  an emergency is active and records the victim's prefab id on the showing's state; a
+  `kill` resolve matches the death, and `or_gone = true` also matches the removal. A
+  death that happened before the card appeared is not recorded (the card's requirement
+  is "you saw it die", not "it is already gone").
+
+### Deerclops spawner (verified 2026-11-21)
+
+- `TheWorld.components.deerclopsspawner` exists on the forest shard only
+  (`prefabs/forest.lua:655`); it asserts `ismastersim`. It schedules attacks with the
+  world-settings timer `deerclops_timetoattack`.
+- **Enabled/disabled is `TUNING.SPAWN_DEERCLOPS`.** The world setting `deerclops`
+  (`map/customize.lua:456`, world `forest`) is mapped in
+  `worldsettings_overrides.lua:37-65`: `never` sets `SPAWN_DEERCLOPS = false`, `rare`
+  sets `DEERCLOPS_ATTACKS_PER_SEASON = 2`, `often` = 8, `always` = 10 plus
+  `DEERCLOPS_ATTACKS_OFF_SEASON = true`; defaults are 4 and `true`. The overrides run
+  *pre* world creation (`OverrideTuningVariables`), and the spawner passes
+  `TUNING.SPAWN_DEERCLOPS` as the timer's enabled flag
+  (`components/deerclopsspawner.lua:299`). Reading `TUNING.SPAWN_DEERCLOPS` (and a
+  positive `DEERCLOPS_ATTACKS_PER_SEASON`) at runtime is therefore the correct "can a
+  Deerclops happen in this world" test. The `deerclopsspawner` component itself is the
+  shard check (caves has none).
+- Attacks are gated by `TheWorld.state.cycles > TUNING.NO_BOSS_TIME` (default 26,
+  `tuning.lua:3041`) and by winter (`components/deerclopsspawner.lua:AllowedToAttack`).
+  The delay is `(winterlength - 1) * TOTAL_DAY_TIME / (DEERCLOPS_ATTACKS_PER_SEASON + 1)`,
+  so the first winter attack lands around day 30: `NO_BOSS_TIME` finally allows the
+  timer on day 28 (cycles 27), which then waits ~2.8 days. This is why the shipped card
+  targets day 30.
+- **Winter's end despawns it.** The prefab watches `stopwinter` (`prefabs/deerclops.lua`,
+  `inst:WatchWorldState("stopwinter", OnStopWinter)`). When `DEERCLOPS_ATTACKS_OFF_SEASON`
+  is false and the Deerclops is **asleep** (no player nearby) and not `ignorebase`, it
+  pushes `storehassler` on TheWorld and `Remove()`s itself, so `hasslerremoved` follows.
+  An awake Deerclops stays until it next sleeps: `OnEntitySleep` leaves when
+  `WantsToLeave()` -- true off-season, or when it has no combat target, is sated and has
+  been alive ≥120 s. Either way a despawn is observable via `storehassler` /
+  `hasslerremoved`; a kill is not the only way for the fight to end.
+- In the server console, `TheWorld.components.deerclopsspawner:SummonMonster(ThePlayer)`
+  starts the timer with 10 seconds left (`deerclopsspawner.lua`), which is the quick way
+  to test a Deerclops emergency without waiting for winter.
+- The spawner stores/restores an already-spawned Deerclops (`storehassler` /
+  `hasslerremoved`) and avoids spawning two (`ReleaseHassler` returns an existing
+  `deerclops`). A `kill` resolve matches the prefab id, so it does not care which
+  spawner instance produced it.
+
+## Player death, ghosts and revival (verified 2026-11-21)
+
+- **Ghost state is the `playerghost` tag, not `Health:IsDead()`.** `OnMakePlayerGhost`
+  (`prefabs/player_common_extensions.lua:673-740`) adds the tag, switches the state graph
+  to `SGwilsonghost`, disables healing, makes the player invincible and **resets health
+  to `TUNING.RESURRECT_HEALTH` (50)** before pushing `ms_becameghost`. So `IsDead()`
+  (`currenthealth <= 0`) is **false** for a ghost; use `inst:HasTag("playerghost")`.
+  `IsDead()` only covers the instant between the fatal `SetVal` and the ghost
+  conversion.
+- **Coming back** is `DoActualRez` (`prefabs/player_common_extensions.lua:327-430`): it
+  restores the player state graph, removes the `playerghost` tag and pushes
+  **`ms_respawnedfromghost`** on the player (`:430`). The input path is the player's own
+  `respawnfromghost` event (`{ source }`), consumed by the stategraph.
+- **Revival paths in the current build** (all server-side):
+  - **Telltale Heart (`reviver`)** — a *living* player gives a `reviver`-tagged item to
+    the ghost (`player_common.lua:333-353`); a ghost cannot pick one up. The item is
+    consumed, the giver gains `REVIVE_OTHER_SANITY_BONUS`, the revived player takes
+    `TUNING.REVIVE_HEALTH_PENALTY` (0.25 of max health).
+  - **Touch Stone (`resurrectionstone`)** — haunted. Every successful haunt pushes
+    `haunt` on the doer (`actions.lua:3154-3164`); the hauntable's `HAUNT_INSTANT_REZ`
+    then pushes `respawnfromghost` (`components/hauntable.lua:88-96`). One use per player
+    per stone (`components/touchstonetracker.lua`); the stone re-arms after 20 s for
+    other players.
+  - **Life Giving Amulet (`amulet`)** — drops on death; the ghost haunts the amulet (the
+    red amulet's `hauntable` is unconditional, `prefabs/amulet.lua:441-448`).
+  - **Meat Effigy (`resurrectionstatue`)** and **Wendy's Perennial Altar
+    (`wendy_resurrectiongrave`)** — attunable remote resurrectors
+    (`components/attunable.lua`; tags `remoteresurrector` / `gravestoneresurrector`). A
+    ghost presses the HUD revive button
+    (`components/playercontroller.lua:2429-2474`, `ACTIONS.REMOTERESURRECT` at
+    `actions.lua:4117-4129`); the structure is consumed.
+  - **Wanda's Second Chance Watch (`pocketwatch_revive`)** and **WX-78's Backup Chassis
+    (`wx78_backupbody`)** are character-specific haunt/cast revivals. **Wortox's
+    Twintailed Heart (`wortox_reviver`)** carries the `reviver` tag, so it uses the
+    give-to-the-ghost path above.
+- **The Florid Postern (`multiplayer_portal`) is only a resurrector when the world
+  setting `portal_rez` is on.** `multiplayer_portal.lua:104-105` calls
+  `OnGetPortalRez(inst, GetPortalRez())` and watches `ms_onportalrez`; that function adds
+  `hauntable` + `HAUNT_INSTANT_REZ` and the `resurrector` tag only when true
+  (`:45-56`). The setting comes from the world-gen option `portalresurection`
+  (`map/customize.lua:674`, values `none`/`always`,
+  `worldsettings_overrides.lua:3973-3980`); the Relaxed and Endless presets set it to
+  `always` (`map/levels/forest.lua:303-395`). `GetPortalRez()` (`gamemodes.lua:294-296`)
+  reads `worldsettings:GetSetting("portal_rez")`, and the option is
+  `master_controlled`/`master_sync`, so the forest's value is synced to the caves. The
+  Celestial Portal (`multiplayer_portal_moonrock`) also calls `OnGetPortalRez`, and both
+  portals carry the `multiplayer_portal` tag.
+- **`TheWorld.components.worldsettings:GetSetting(name)`** returns the raw value
+  (`components/worldsettings.lua:16-18`), or `nil` when unset. This is the mod-safe read
+  for a world setting; the `GetPortalRez()` / `GetGameModeProperty()` globals are also
+  available on the server.
+
 ## Netvars
 
 - Constructors: `net_string(guid, name)` or `net_string(guid, name, dirty_event_name)`;
@@ -1017,11 +1162,12 @@ Verified 2026-11-14 against `scripts/components/hounded.lua` and
   so a backing sized from it was too short). When you control the wrapping with
   `SetMultilineTruncatedString`, use its **return value (the line count)** times a
   one-line height instead.
-  **An empty string measures `nil`, not 0** (observed in-game 2026-11-14): a row whose
-  counter text was `""` made `GetRegionSize()` return nil, and the `math.max` that
-  collected the widest counter threw. That aborted the row-build pass midway, leaving
-  the counters of earlier rows on screen with no labels or icons. Guard every measured
-  width with `or 0`.
+  **An empty string measures garbage, not 0** (observed in-game 2026-11-14 as `nil`,
+  and 2026-11-22 as `1.7014117e+38`, i.e. FLT_MAX, after `ResetRegionSize()`): a row
+  whose counter text was `""` either threw in the `math.max` that collected the widest
+  counter (nil) or produced a huge width that drove every label's region negative, so
+  no label drew (the `tip` row on the Restless Spirit card). `or 0` only covers the nil
+  case. **Never measure an empty string**: test `text ~= ""` first and use width 0.
 - **Glyph advances vary per character.** In `stint-ucr50` (BODYTEXTFONT) at size 24 the
   advances are: `0` 7.68 px (the widest digit); `2`,`3`,`5` 6.72; `4`,`6`,`8`,`9` 7.2;
   `7` 6.24; `1`,`/`,`-`,`°` 5.28; `%` 9.6. (Measured 2026-11-14 from
@@ -1222,6 +1368,16 @@ widget code. In `modmain.lua` (sandbox env) use `GLOBAL.TITLEFONT`.
   `inventoryimages3.xml`; `bedroll_straw.tex` and the `bedroll_furry*` variants
   (including the quilt skins) in `inventoryimages1.xml`. The tracker uses `campfire`
   as the default icon for `cook` rows and `tent` for `sleep` rows.
+- Verified 2026-11-21: cooked meat's prefab id is **`cookedmeat`**, not `meat_cooked`
+  (`prefabs/meats.lua:900`: `Prefab("cookedmeat", cooked, assets)`). Its icon
+  `cookedmeat.tex` is in `inventoryimages1.xml` and resolves through the default helper.
+  There is no `meat_cooked.tex` in any inventory atlas and no `meat_cooked` prefab, so a
+  data row using it renders no icon *and* never matches `oneat`. The `<prefab>.tex`
+  convention holds only when the id is correct — when an icon is missing, check the
+  prefab id against the game's `Prefab(...)` declarations before suspecting the tracker.
+  Other cooked meats do not share a naming pattern: `cookedmonstermeat`,
+  `cookedsmallmeat`, `drumstick_cooked`, `cactus_meat_cooked`
+  (`prefabs/meats.lua:899-931`, `prefabs/cactus.lua`).
 - **Scrapbook art** (verified 2026-11-08, not used by the tracker):
   `GetScrapbookIconAtlas(imagename)` probes `images/scrapbook_icons1..3.xml` with
   `TheSim:AtlasContains` (`simutil.lua:749-771`), and all three atlases are preloaded

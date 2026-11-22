@@ -100,6 +100,9 @@ STRINGS = { NAMES = {
 -- migration record in a save file. `TheShard:GetShardId()` is this shard.
 TheWorld = { state = { cycles = 0 }, meta = { session_identifier = "HARNESS_WORLD_SESSION" } }
 TheShard = { GetShardId = function() return "HARNESS_SHARD" end }
+-- Connected players, used by the `ghost_nearby` condition's cheap
+-- "is anyone else even here" check. `Spawn` appends every fixture player.
+AllPlayers = {}
 -- Nearby world entities for `shared` build rows. The stub filters by tag and
 -- radius the way the engine does, so the `structure` tag filter and the radius
 -- are exercised rather than mocked away. Entries:
@@ -182,6 +185,11 @@ end
 
 -- ---- fake player entity --------------------------------------------------
 
+-- `WatchWorldState` callbacks, per world-state variable. The real worldstate
+-- component calls each watcher after storing the new value (`SetVariable` in
+-- scripts/components/worldstate.lua); `SetDay` below reproduces that order.
+local worldstate_watchers = {}
+
 local function NewInst(guid)
     local inst = {
         GUID = guid,
@@ -211,6 +219,13 @@ local function NewInst(guid)
         self._listeners[event] = self._listeners[event] or {}
         table.insert(self._listeners[event], fn)
     end
+    -- The manager watches `cycles` for day-based emergency triggers. Record the
+    -- callback here; SetDay updates TheWorld.state first and then fires it, in
+    -- the same order the engine's worldstate component does.
+    function inst:WatchWorldState(var, fn)
+        worldstate_watchers[var] = worldstate_watchers[var] or {}
+        table.insert(worldstate_watchers[var], { inst = self, fn = fn })
+    end
     function inst:DoPeriodicTask(period, fn)
         return NewTask(clock + period, fn, period, self)
     end
@@ -224,6 +239,12 @@ local function NewInst(guid)
             return inst.x or 0, 0, inst.z or 0
         end,
     }
+    -- Player tags. The manager reads `playerghost` for the death card, and the
+    -- fixture can add/remove it to simulate dying and reviving.
+    inst.tags = {}
+    function inst:HasTag(tag) return self.tags[tag] == true end
+    function inst:AddTag(tag) self.tags[tag] = true end
+    function inst:RemoveTag(tag) self.tags[tag] = nil end
     function inst:GetDisplayName() return "Wilson" end
     function inst:IsValid() return true end
     function inst:Fire(event, data)
@@ -232,6 +253,19 @@ local function NewInst(guid)
         end
     end
     return inst
+end
+
+-- Start a new world day the way the engine does: update
+-- `TheWorld.state.cycles` (1-based day minus one) and only then invoke the
+-- watchers. `target` limits the callback to one player's manager, so a fixture
+-- day cannot pop cards on every earlier fixture.
+local function SetDay(target, day)
+    TheWorld.state.cycles = day - 1
+    for _, watcher in ipairs(worldstate_watchers.cycles or {}) do
+        if target == nil or watcher.inst == target then
+            watcher.fn(watcher.inst, day - 1)
+        end
+    end
 end
 
 -- The walkthrough player; assigned once the manager module is loaded below.
@@ -245,6 +279,7 @@ end
 
 local Netvars = require("guidedmissions/netvars")
 local Objectives = require("guidedmissions/objectives")
+local Conditions = require("guidedmissions/conditions")
 local RealMissions = require("guidedmissions/missions")
 local RealEmergencies = require("guidedmissions/emergencies")
 local Strings = require("guidedmissions/strings")
@@ -361,6 +396,8 @@ local needs_prefab = {
 local optional_prefab = {
     cook = true, cookpot = true, prototype = true, plant = true, trap_catch = true,
     sleep = true, fertilize = true, equip = true, deploy = true,
+    -- `haunt` names either `prefab` or `tag`; the pair rule lives below.
+    haunt = true,
 }
 
 -- Shared by chain and emergency validation. Returns `optional == true` so the
@@ -385,6 +422,25 @@ local function ValidateObjectiveFields(where, objective, index)
         objective.self ~= true or objective.type == "fertilize")
     Check(row .. " self rows do not filter a plant",
         objective.self ~= true or objective.prefab == nil)
+
+    -- `tag` is the multi-entity form of a `haunt` filter (the Florid Postern
+    -- and its Celestial Portal upgrade share `multiplayer_portal`).
+    if objective.tag ~= nil then
+        Check(row .. " tag is only set on haunt rows", objective.type == "haunt")
+        Check(row .. " tag is a tag id", IsPrefabId(objective.tag))
+    end
+
+    -- `when` gates a row on a world setting. Only optional rows: a hidden
+    -- required row would remove a mission's gate without the player seeing it.
+    if objective.when ~= nil then
+        Check(row .. " when is a table", type(objective.when) == "table")
+        if type(objective.when) == "table" then
+            Check(row .. " when names a known world setting",
+                Conditions.VALID_WORLD_SETTINGS[objective.when.setting] == true)
+        end
+        Check(row .. " when is only on optional rows",
+            Objectives.IsOptional(objective))
+    end
 
     if needs_prefab[objective.type] then
         Check(row .. " names a prefab id", IsPrefabId(objective.prefab))
@@ -473,6 +529,17 @@ local function ValidateObjectiveFields(where, objective, index)
         Check(row .. " slot is known",
             objective.slot == nil
                 or Objectives.EQUIP_SLOTS[objective.slot] == true)
+    elseif objective.type == "haunt" then
+        -- Exactly one filter: a prefab id or a tag. A tag row has no prefab to
+        -- draw, so it must name its icon.
+        Check(row .. " names exactly one of prefab or tag",
+            (objective.prefab ~= nil) ~= (objective.tag ~= nil))
+        Check(row .. " tag rows name an icon",
+            objective.tag == nil or objective.icon ~= nil)
+        Check(row .. " count is a positive whole number when set",
+            objective.count == nil
+                or (tonumber(objective.count) ~= nil
+                    and tonumber(objective.count) >= 1))
     else
         Check(row .. " has a count", tonumber(objective.count) ~= nil)
     end
@@ -593,6 +660,11 @@ for i, entry in ipairs(RealEmergencies.entries) do
             or (type(entry.resolved_subtext) == "string" and #entry.resolved_subtext > 0))
     Check(where .. " hint is text when set",
         entry.hint == nil or (type(entry.hint) == "string" and #entry.hint > 0))
+    -- A per-entry repeat override exists for momentary cards that must return
+    -- every time. The fired set is still persisted according to the global
+    -- mode, so "always" is the only value that stays coherent.
+    Check(where .. " frequency is always when set",
+        entry.frequency == nil or entry.frequency == "always")
 
     local function ValidateCondition(name, condition)
         Check(where .. " " .. name .. " is a table", type(condition) == "table")
@@ -613,6 +685,57 @@ for i, entry in ipairs(RealEmergencies.entries) do
             return nil, nil
         end
 
+        if condition.kind == "cycle" then
+            -- A day is a moment, not a way out; it is a trigger only.
+            Check(where .. " uses cycle only as a trigger", name == "trigger")
+            Check(where .. " cycle day is a positive whole number",
+                type(condition.day) == "number" and condition.day >= 1
+                    and condition.day % 1 == 0)
+            if condition.boss ~= nil then
+                Check(where .. " cycle boss is known",
+                    RealEmergencies.VALID_BOSSES[condition.boss] == true)
+                Check(where .. " cycle boss matches the kill prefab",
+                    type(entry.resolve) == "table"
+                        and entry.resolve.prefab == condition.boss)
+            end
+            return nil, nil
+        end
+
+        if condition.kind == "kill" then
+            -- A death is something that happens while the card is up, so it is
+            -- a resolve only; it cannot be the reason a card appears.
+            Check(where .. " uses kill only as a resolve", name == "resolve")
+            Check(where .. " kill names a prefab id", IsPrefabId(condition.prefab))
+            Check(where .. " kill or_gone is a boolean when set",
+                condition.or_gone == nil or type(condition.or_gone) == "boolean")
+            return nil, nil
+        end
+
+        if condition.kind == "ghost" then
+            -- "You are a ghost" is a reason a card appears (the death card);
+            -- it cannot be a way out.
+            Check(where .. " uses ghost only as a trigger", name == "trigger")
+            return nil, nil
+        end
+
+        if condition.kind == "revived" then
+            -- Being alive again is the way out of the death card, so it is a
+            -- resolve only.
+            Check(where .. " uses revived only as a resolve", name == "resolve")
+            return nil, nil
+        end
+
+        if condition.kind == "ghost_nearby" then
+            Check(where .. " " .. name .. " ghost state is known",
+                RealEmergencies.VALID_GHOST_STATES[condition.state] == true)
+            -- "clear" as a trigger would fire when nobody is there.
+            if name == "trigger" then
+                Check(where .. " trigger ghost state is not clear",
+                    condition.state ~= "clear")
+            end
+            return nil, nil
+        end
+
         Check(where .. " " .. name .. " stat is known",
             RealEmergencies.VALID_STATS[condition.stat] == true)
 
@@ -628,6 +751,37 @@ for i, entry in ipairs(RealEmergencies.entries) do
         ValidateCondition("resolve", entry.resolve)
     local stat_emergency = type(entry.trigger) == "table"
         and entry.trigger.kind == "stat"
+    -- A cycle trigger counts down to a fight, so its card can only end when the
+    -- named creature dies; and a kill resolve needs such a trigger to start
+    -- from.
+    if type(entry.trigger) == "table" and entry.trigger.kind == "cycle" then
+        Check(where .. " cycle trigger pairs with a kill resolve",
+            type(entry.resolve) == "table" and entry.resolve.kind == "kill")
+    end
+    if type(entry.resolve) == "table" and entry.resolve.kind == "kill" then
+        Check(where .. " kill resolve pairs with a cycle trigger",
+            type(entry.trigger) == "table" and entry.trigger.kind == "cycle")
+    end
+    if type(entry.trigger) == "table" and entry.trigger.kind == "ghost" then
+        Check(where .. " ghost trigger pairs with a revived resolve",
+            type(entry.resolve) == "table" and entry.resolve.kind == "revived")
+    end
+    if type(entry.resolve) == "table" and entry.resolve.kind == "revived" then
+        Check(where .. " revived resolve pairs with a ghost trigger",
+            type(entry.trigger) == "table" and entry.trigger.kind == "ghost")
+    end
+    if type(entry.trigger) == "table" and entry.trigger.kind == "ghost_nearby" then
+        Check(where .. " ghost_nearby trigger pairs with a clear resolve",
+            type(entry.resolve) == "table"
+                and entry.resolve.kind == "ghost_nearby"
+                and entry.resolve.state == "clear")
+    end
+    if type(entry.resolve) == "table" and entry.resolve.kind == "ghost_nearby" then
+        Check(where .. " ghost_nearby resolve pairs with a nearby trigger",
+            type(entry.trigger) == "table"
+                and entry.trigger.kind == "ghost_nearby"
+                and entry.trigger.state == "nearby")
+    end
     if stat_emergency then
         Check(where .. " trigger and resolve use the same stat",
             type(entry.resolve) == "table"
@@ -657,8 +811,9 @@ for i, entry in ipairs(RealEmergencies.entries) do
 
     -- Stat emergencies have exactly one required row: the recovery goal. It
     -- must match `resolve`, so the card cannot promise a threshold different
-    -- from the one that ends the emergency. Hound emergencies resolve on world
-    -- state, so they have no required row; every row is optional guidance.
+    -- from the one that ends the emergency. Hound and cycle emergencies resolve
+    -- on world state, so they have no required row; every row is optional
+    -- guidance.
     local required_count = 0
     for j, objective in ipairs(entry.objectives or {}) do
         if not ValidateObjectiveFields(where, objective, j) then
@@ -722,6 +877,20 @@ package.loaded["guidedmissions/missions"] = SyntheticMissions
 -- entries, so content edits cannot break the mechanics tests.
 local SyntheticEmergencies = {
     {
+        -- Death card. `always`: it must come back on every death even while the
+        -- global repeat mode is "session".
+        id = "harness_emergency_ghost",
+        title = "Harness Emergency Ghost",
+        subtext = "You are a ghost.",
+        resolved_subtext = "Alive again.",
+        frequency = "always",
+        trigger = { kind = "ghost" },
+        resolve = { kind = "revived" },
+        objectives = {
+            { type = "tip", icon = "reviver", label = "Ask a friend", optional = true },
+        },
+    },
+    {
         id = "harness_emergency_health",
         title = "Harness Emergency Health",
         subtext = "Hurt.",
@@ -750,17 +919,47 @@ local SyntheticEmergencies = {
             { type = "sanity", count = 10, label = "Restore sanity", optional = true },
         },
     },
+    {
+        -- Day-based trigger with a kill resolve. Day 999 keeps it dormant for
+        -- every other fixture; only SetDay(999) arms it.
+        id = "harness_emergency_cycle",
+        title = "Harness Emergency Cycle",
+        subtext = "Something is coming.",
+        resolved_subtext = "It is dead.",
+        trigger = { kind = "cycle", day = 999 },
+        resolve = { kind = "kill", prefab = "harness_monster", or_gone = true },
+        objectives = {
+            { type = "tip", label = "Prepare for a fight", optional = true },
+        },
+    },
+    {
+        -- The living half: a player standing near a dead friend.
+        id = "harness_emergency_friend",
+        title = "Harness Emergency Friend",
+        subtext = "A friend is a ghost.",
+        resolved_subtext = "No ghosts nearby.",
+        frequency = "always",
+        trigger = { kind = "ghost_nearby", state = "nearby" },
+        resolve = { kind = "ghost_nearby", state = "clear" },
+        objectives = {
+            { type = "tip", icon = "reviver", label = "Craft a heart", optional = true },
+        },
+    },
 }
 package.loaded["guidedmissions/emergencies"] = {
     entries = SyntheticEmergencies,
     VALID_STATS = RealEmergencies.VALID_STATS,
     VALID_KINDS = RealEmergencies.VALID_KINDS,
+    IsGhost = RealEmergencies.IsGhost,
+    CanTriggerWhileGhost = RealEmergencies.CanTriggerWhileGhost,
     GetStatFraction = RealEmergencies.GetStatFraction,
     GetStatValue = RealEmergencies.GetStatValue,
     ParseThreshold = RealEmergencies.ParseThreshold,
     ParseStatThreshold = RealEmergencies.ParseStatThreshold,
     IsTriggered = RealEmergencies.IsTriggered,
     IsResolved = RealEmergencies.IsResolved,
+    NewState = RealEmergencies.NewState,
+    NoteEvent = RealEmergencies.NoteEvent,
 }
 
 local Manager = require("guidedmissions/manager")
@@ -780,6 +979,7 @@ local function Spawn(setup)
         setup(player)
     end
     Netvars.Attach(player)
+    AllPlayers[#AllPlayers + 1] = player
     local fixture_manager = Manager(player)
     Advance(1)
     return fixture_manager, player
@@ -1172,6 +1372,117 @@ Check("a dead hound does not keep the card open",
 
 TheSim.entities = {}
 TheWorld.components = nil
+
+-- Scoped so these fixtures do not add to the main chunk's 200-local limit.
+do
+    -- Cycle trigger and kill resolve, at the condition level first. The day is the
+    -- 1-based number the HUD shows (cycles + 1); a kill is a death of the named
+    -- prefab while the card is up, whoever caused it.
+    local cycle_entry = {
+        trigger = { kind = "cycle", day = 3 },
+        resolve = { kind = "kill", prefab = "deerclops" },
+    }
+    TheWorld.state.cycles = 2
+    Check("cycle trigger fires on its day",
+        RealEmergencies.IsTriggered(cycle_entry, hound_player))
+    TheWorld.state.cycles = 3
+    Check("cycle trigger does not fire late",
+        not RealEmergencies.IsTriggered(cycle_entry, hound_player))
+    Check("a malformed cycle day never triggers",
+        not RealEmergencies.IsTriggered(
+            { trigger = { kind = "cycle", day = "three" } }, hound_player))
+    
+    local kill_state = RealEmergencies.NewState()
+    Check("kill resolve is false before any death",
+        not RealEmergencies.IsResolved(cycle_entry, hound_player, kill_state))
+    RealEmergencies.NoteEvent(kill_state, "entity_death", { inst = { prefab = "hound" } })
+    Check("an unrelated death does not resolve",
+        not RealEmergencies.IsResolved(cycle_entry, hound_player, kill_state))
+    RealEmergencies.NoteEvent(kill_state, "entity_death", {
+        inst = { prefab = "deerclops" },
+        afflicter = { prefab = "tentacle" },
+    })
+    Check("a death by any killer resolves",
+        RealEmergencies.IsResolved(cycle_entry, hound_player, kill_state))
+    Check("kill resolve without state is false",
+        not RealEmergencies.IsResolved(cycle_entry, hound_player))
+    
+    -- A `boss` guard suppresses the whole trigger when that boss cannot appear in
+    -- this world. The "Never" setting flips TUNING.SPAWN_DEERCLOPS at world
+    -- creation, and the spawner component only exists on the forest shard.
+    local boss_entry = { trigger = { kind = "cycle", day = 3, boss = "deerclops" } }
+    TUNING = { SPAWN_DEERCLOPS = true, DEERCLOPS_ATTACKS_PER_SEASON = 4 }
+    TheWorld.components = { deerclopsspawner = {} }
+    TheWorld.state.cycles = 2
+    Check("cycle boss guard passes when the boss is enabled",
+        RealEmergencies.IsTriggered(boss_entry, hound_player))
+    TUNING.SPAWN_DEERCLOPS = false
+    Check("cycle boss guard blocks a disabled boss",
+        not RealEmergencies.IsTriggered(boss_entry, hound_player))
+    TUNING.SPAWN_DEERCLOPS = true
+    TUNING.DEERCLOPS_ATTACKS_PER_SEASON = 0
+    Check("cycle boss guard blocks a zeroed attack rate",
+        not RealEmergencies.IsTriggered(boss_entry, hound_player))
+    TUNING.DEERCLOPS_ATTACKS_PER_SEASON = 4
+    TheWorld.components = nil
+    Check("cycle boss guard blocks a shard without the spawner",
+        not RealEmergencies.IsTriggered(boss_entry, hound_player))
+    Check("an unknown boss guard never fires",
+        not RealEmergencies.IsTriggered(
+            { trigger = { kind = "cycle", day = 3, boss = "bearger" } }, hound_player))
+    TUNING = nil
+    TheWorld.state.cycles = 0
+    
+    -- `or_gone` adds "the boss left/despawned" to a kill resolve. The payload of
+    -- `hasslerremoved` is the entity itself, unlike `entity_death`.
+    local gone_entry = {
+        resolve = { kind = "kill", prefab = "deerclops", or_gone = true },
+    }
+    local gone_state = RealEmergencies.NewState()
+    RealEmergencies.NoteEvent(gone_state, "hasslerremoved", { prefab = "deerclops" })
+    Check("a boss removal resolves an or_gone kill",
+        RealEmergencies.IsResolved(gone_entry, hound_player, gone_state))
+    Check("a boss removal does not resolve a plain kill",
+        not RealEmergencies.IsResolved(cycle_entry, hound_player, gone_state))
+    local other_boss_state = RealEmergencies.NewState()
+    RealEmergencies.NoteEvent(other_boss_state, "hasslerremoved", { prefab = "bearger" })
+    Check("an unrelated boss removal does not resolve",
+        not RealEmergencies.IsResolved(gone_entry, hound_player, other_boss_state))
+    
+    -- The same pair through the manager: the world-state watcher pops the card on
+    -- the day, and the world's `entity_death` event resolves it.
+    local cycle_manager, cycle_player = Spawn()
+    SetDay(cycle_player, 999)
+    Check("cycle card pops at the start of its day",
+        Read(cycle_player)["guidedmissions.title"] == "Harness Emergency Cycle")
+    Check("cycle card state", State(cycle_player) == "emergency")
+    Check("cycle card carries only optional rows", Row(cycle_player, 1)[5] == "1")
+    
+    cycle_player:Fire("entity_death", { inst = { prefab = "hound" } })
+    Check("an unrelated death keeps the cycle card up", State(cycle_player) == "emergency")
+    cycle_player:Fire("entity_death", {
+        inst = { prefab = "harness_monster" },
+        afflicter = { prefab = "hound" },
+    })
+    Check("the named death resolves the cycle card", State(cycle_player) == "won")
+    TheWorld.state.cycles = 0
+    Advance(3)
+    Check("chain restored after a cycle emergency",
+        Read(cycle_player)["guidedmissions.title"] == "Harness First")
+    
+    -- State is scoped to one showing: a death before the card appears is not a kill
+    -- the player saw go down, so it cannot resolve it.
+    local late_manager, late_player = Spawn()
+    late_player:Fire("entity_death", { inst = { prefab = "harness_monster" } })
+    SetDay(late_player, 999)
+    Check("a death from before the card does not resolve it",
+        State(late_player) == "emergency")
+    -- `or_gone` also resolves when the boss is removed (left, despawned, or
+    -- removed): the `hasslerremoved` payload is the entity, not a data table.
+    late_player:Fire("hasslerremoved", { prefab = "harness_monster" })
+    Check("a boss removal resolves the cycle card", State(late_player) == "won")
+    TheWorld.state.cycles = 0
+end
 
 -- Trigger on a stat event, with partial chain progress to preserve.
 local em_manager, em_player = Spawn()
@@ -1620,13 +1931,20 @@ SetHealth(hold_player, 40, 100)
 hold_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
 Check("no emergency during the chain hold", State(hold_player) == "won")
 
+-- Emergencies fire whenever they apply, including after the chain is finished.
+-- The overlay replaces the all-complete card and Sync puts it back on resolve.
 local done_manager, done_player = Spawn()
 done_manager:JumpTo(#SyntheticMissions + 1)
 SetHealth(done_player, 40, 100)
 done_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
-Check("no emergency after chain completion", State(done_player) == "done")
-Advance(1)
-Check("still no emergency after a poll", State(done_player) == "done")
+Check("an emergency fires after chain completion", State(done_player) == "emergency")
+SetHealth(done_player, 80, 100)
+done_player:Fire("healthdelta", { oldpercent = 0.4, newpercent = 0.8, amount = 40 })
+Check("the standalone emergency resolves", State(done_player) == "won")
+Advance(3)
+Check("the all-complete card is restored", State(done_player) == "done")
+Check("the restored card is the finished card",
+    Read(done_player)["guidedmissions.title"] == "All Missions Complete")
 
 -- Cleanup cancels the recovered-card hold as well.
 local cleanup_manager, cleanup_player = Spawn()
@@ -1644,6 +1962,109 @@ for _, task in ipairs(tasks) do
 end
 Check("cleanup: all emergency tasks cancelled",
     cleanup_manager.emergency_hold_task == nil and emergency_live_tasks == 0)
+
+-- ---- ghost, revival and the helper card ---------------------------------
+--
+-- Ghost state is the `playerghost` tag. Health is neutralised to 50 while a
+-- ghost, so the manager must not use IsDead() to spot one.
+
+-- Becoming a ghost pops the death card; the tag clearing resolves it.
+local ghost_manager, ghost_player = Spawn()
+SetHealth(ghost_player, 50, 100)
+ghost_player:AddTag("playerghost")
+ghost_player:Fire("ms_becameghost")
+Check("becoming a ghost pops the death card", State(ghost_player) == "emergency")
+Check("death card title", Read(ghost_player)["guidedmissions.title"]
+    == "Harness Emergency Ghost")
+ghost_player:RemoveTag("playerghost")
+ghost_player:Fire("ms_respawnedfromghost")
+Check("revival resolves the death card", State(ghost_player) == "won")
+Advance(3)
+Check("chain restored after the death card",
+    Read(ghost_player)["guidedmissions.title"] == "Harness First")
+
+-- A death supersedes an active card: a stat card is not actionable while dead.
+local preempt_manager, preempt_player = Spawn()
+SetHealth(preempt_player, 40, 100)
+preempt_player:Fire("healthdelta", { oldpercent = 0.9, newpercent = 0.4, amount = -50 })
+Check("stat card up before the death", Read(preempt_player)["guidedmissions.title"]
+    == "Harness Emergency Health")
+SetHealth(preempt_player, 50, 100)
+preempt_player:AddTag("playerghost")
+preempt_player:Fire("ms_becameghost")
+Check("death preempts the stat card", Read(preempt_player)["guidedmissions.title"]
+    == "Harness Emergency Ghost")
+Check("the preempted card was not marked fired",
+    preempt_manager.fired_emergencies["harness_emergency_health"] == nil)
+preempt_player:RemoveTag("playerghost")
+preempt_player:Fire("ms_respawnedfromghost")
+Advance(3)
+
+-- While a ghost, only the death card is eligible; a low health reading must not
+-- fire the stat card.
+local elig_manager, elig_player = Spawn()
+SetHealth(elig_player, 10, 100)
+elig_player:AddTag("playerghost")
+elig_player:Fire("ms_becameghost")
+Check("a ghost gets the death card, never a stat card",
+    Read(elig_player)["guidedmissions.title"] == "Harness Emergency Ghost")
+elig_player:RemoveTag("playerghost")
+elig_player:Fire("ms_respawnedfromghost")
+Advance(3)
+
+-- The death card is `frequency = "always"`: it returns on a second death even
+-- while the global mode is "session".
+ghost_player:AddTag("playerghost")
+ghost_player:Fire("ms_becameghost")
+Check("the death card returns on a second death", State(ghost_player) == "emergency")
+ghost_player:RemoveTag("playerghost")
+ghost_player:Fire("ms_respawnedfromghost")
+Advance(3)
+
+-- The helper card: a living player standing near a ghost friend. The trigger
+-- radius is 20 and the clear radius 25 (room for a drifting ghost).
+local friend_manager, friend_player = Spawn()
+local ghost_stub = {
+    prefab = "wilson", x = 0, z = 4,
+    tags = { playerghost = true },
+    IsValid = function() return true end,
+}
+TheSim.entities[#TheSim.entities + 1] = ghost_stub
+Advance(1)
+Check("the helper card pops near a ghost", State(friend_player) == "emergency")
+Check("helper card title", Read(friend_player)["guidedmissions.title"]
+    == "Harness Emergency Friend")
+ghost_stub.x = 999
+Advance(1)
+Check("the helper card clears when the ghost leaves", State(friend_player) == "won")
+table.remove(TheSim.entities)
+Advance(3)
+Check("chain restored after the helper card",
+    Read(friend_player)["guidedmissions.title"] == "Harness First")
+
+-- `when` gates a row on a world setting. The row is dropped server-side, so the
+-- client never sees a row that cannot apply.
+local gate_manager, gate_player = Spawn()
+Activate(gate_manager, gate_player, {
+    id = "fixture_when",
+    title = "Gated",
+    subtext = "One row is gated.",
+    objectives = {
+        { type = "collect", prefab = "flint", count = 1, label = "Collect flint" },
+        { type = "tip", icon = "log", label = "Portal only", optional = true,
+          when = { setting = "portal_rez" } },
+    },
+})
+Check("a gated row is hidden without the setting", Row(gate_player, 2)[1] == nil)
+TheWorld.components = { worldsettings = { GetSetting = function(_, name)
+    return name == "portal_rez" and true or nil
+end } }
+gate_manager:Sync()
+Check("a gated row appears with the setting", Row(gate_player, 2)[1] == "Portal only")
+TheWorld.components.worldsettings.GetSetting = function() return nil end
+gate_manager:Sync()
+Check("a gated row hides again when the setting clears", Row(gate_player, 2)[1] == nil)
+TheWorld.components = nil
 
 -- ---- multiplayer mode (shared build rows) --------------------------------
 --
@@ -2837,12 +3258,59 @@ type_fixtures.equip = function()
     Check("equipment worn at mission start counts", Row(start_player, 1)[3] == "1/1")
 end
 
+type_fixtures.haunt = function()
+    -- A haunt is credited by the `haunt` event ACTIONS.HAUNT.fn pushes on the
+    -- doer, matched by prefab or tag. It is a tracked row, so a required one
+    -- can gate a mission.
+    local fixture_manager, player = Spawn()
+    Activate(fixture_manager, player, {
+        id = "fixture_haunt",
+        title = "Touch the Stone",
+        subtext = "Haunt it.",
+        objectives = {
+            { type = "haunt", prefab = "resurrectionstone",
+              label = "Haunt a Touch Stone" },
+        },
+    })
+    Check("haunt starts at zero", Row(player, 1)[3] == "0/1")
+    Check("haunt icon follows the prefab", Row(player, 1)[2] == "resurrectionstone")
+    player:Fire("haunt", { target = { prefab = "log" } })
+    Check("haunting another prefab does not count", Row(player, 1)[3] == "0/1")
+    player:Fire("haunt", { target = { prefab = "resurrectionstone" } })
+    Check("haunting the named prefab counts", Row(player, 1)[3] == "1/1")
+    Check("a required haunt row completes the mission", State(player) == "won")
+
+    -- A tag filter matches related prefabs (the Florid Postern and its
+    -- Celestial Portal upgrade), and a tag-only row names its icon.
+    local tag_manager, tag_player = Spawn()
+    Activate(tag_manager, tag_player, {
+        id = "fixture_haunt_tag",
+        title = "Haunt the Postern",
+        subtext = "Any spawn portal.",
+        objectives = {
+            { type = "collect", prefab = "flint", count = 1, label = "Collect flint" },
+            { type = "haunt", tag = "multiplayer_portal", icon = "multiplayer_portal",
+              label = "Haunt a postern", optional = true },
+        },
+    })
+    local moonrock_portal = { prefab = "multiplayer_portal_moonrock" }
+    function moonrock_portal:HasTag(tag) return tag == "multiplayer_portal" end
+    tag_player:Fire("haunt", { target = moonrock_portal })
+    Check("a tag-filtered haunt counts a related entity", Row(tag_player, 2)[3] == "1/1")
+    Check("a tag haunt row renders its named icon",
+        Row(tag_player, 2)[2] == "multiplayer_portal")
+    Check("an optional haunt row does not finish the mission", State(tag_player) == "active")
+    Carry(tag_player, "flint", 1)
+    InventoryChanged(tag_player)
+    Check("the required row still completes the mission", State(tag_player) == "won")
+end
+
 type_fixtures.tip = function()
     -- A tip is informational: it renders after the required rows in the
-    -- optional group, has no icon and never completes. Otherwise it is an
-    -- ordinary row -- in particular it carries a normal 0/1 counter, because a
-    -- blank counter measures nil in the HUD's text widget and breaks the row
-    -- layout. It is optional whether or not the flag is set.
+    -- optional group, has no icon, no counter, and never completes. The blank
+    -- counter is deliberate: the HUD treats a nil region size as zero width and
+    -- pulls the label up to the right edge. It is optional whether or not the
+    -- flag is set.
     local fixture_manager, player = Spawn()
     Activate(fixture_manager, player, {
         id = "fixture_tip",
@@ -2855,7 +3323,7 @@ type_fixtures.tip = function()
     })
     Check("tip renders after the required rows", Row(player, 2)[1] == "Stand under a tree")
     Check("tip row is always optional", Row(player, 2)[5] == "1")
-    Check("tip row renders a normal counter", Row(player, 2)[3] == "0/1")
+    Check("tip row renders no counter", Row(player, 2)[3] == "")
     Check("tip row has no icon by default", Row(player, 2)[2] == "")
     Check("tip row is never checked", Row(player, 2)[4] == "0")
 
@@ -2983,7 +3451,7 @@ do
     Check("the real restore_health mission exists", restore_health ~= nil)
     if restore_health ~= nil then
         local expected = {
-            wathgrithr = "Craft a Healing Salve",
+            wathgrithr = "Eat a Spider Gland",
             warly = "Eat Trail Mix",
             wormwood = "Fertilize yourself",
         }
@@ -3008,6 +3476,33 @@ end
 -- without pinning any content: titles, counts, order and wording may change
 -- freely.
 
+-- Every row must carry a label and a done flag; every row except a `tip` must
+-- also carry a counter. A tip has no progress, so its counter is deliberately
+-- blank and the HUD guards the nil measurement (See BuildRows in the tracker).
+-- Rows are emitted required-then-optional, and a tip is always optional, so
+-- the expected row order is reproduced here to know which row is a tip.
+local function WellFormedRows(objectives, rows)
+    local is_tip = {}
+    for pass = 1, 2 do
+        for _, objective in ipairs(objectives or {}) do
+            local optional = objective.type == "tip" or objective.optional == true
+            if optional == (pass == 2) then
+                is_tip[#is_tip + 1] = objective.type == "tip"
+            end
+        end
+    end
+    for i, fields in ipairs(rows) do
+        if fields[1] == nil or fields[1] == ""
+            or fields[4] == nil then
+            return false
+        end
+        if (fields[3] == nil or fields[3] == "") and not is_tip[i] then
+            return false
+        end
+    end
+    return true
+end
+
 for i, mission in ipairs(RealMissions) do
     local smoke_manager, player = Spawn()
     Activate(smoke_manager, player, mission)
@@ -3015,24 +3510,19 @@ for i, mission in ipairs(RealMissions) do
     local label = string.format("real mission %d (%s) renders", i, tostring(mission.id))
     local rows = Rows(Read(player)["guidedmissions.rows"])
     Check(label .. " one row per objective", #rows == #(mission.objectives or {}))
-
-    -- Every row must carry a label, a counter and a done flag. A blank counter
-    -- breaks the HUD's row layout (see BuildRows in the tracker), so no type may
-    -- emit one.
-    local well_formed = true
-    for _, fields in ipairs(rows) do
-        if fields[1] == nil or fields[1] == ""
-            or fields[3] == nil or fields[3] == ""
-            or fields[4] == nil then
-            well_formed = false
-        end
-    end
-    Check(label .. " every row has a label, counter and done flag", well_formed)
+    Check(label .. " every row has a label, counter and done flag",
+        WellFormedRows(mission.objectives, rows))
 end
 
 -- ---- real emergency render smoke ----------------------------------------
 --
 -- Same contract as the mission smoke, using the real emergency entries.
+-- Portal resurrection is on here so the death card's gated postern row renders
+-- and the expected row count matches the entry's objective list.
+
+TheWorld.components = { worldsettings = { GetSetting = function(_, name)
+    return name == "portal_rez" and true or nil
+end } }
 
 for i, entry in ipairs(RealEmergencies.entries) do
     local smoke_manager, player = Spawn()
@@ -3046,17 +3536,9 @@ for i, entry in ipairs(RealEmergencies.entries) do
     local rows = Rows(Read(player)["guidedmissions.rows"])
     Check(label .. " one row per objective", #rows == #(entry.objectives or {}))
 
-    -- Same contract as the mission smoke: a non-empty label, counter and done
-    -- flag on every row.
-    local well_formed = true
-    for _, fields in ipairs(rows) do
-        if fields[1] == nil or fields[1] == ""
-            or fields[3] == nil or fields[3] == ""
-            or fields[4] == nil then
-            well_formed = false
-        end
-    end
-    Check(label .. " every row has a label, counter and done flag", well_formed)
+    -- Same contract as the mission smoke, blank counters allowed on tips only.
+    Check(label .. " every row has a label, counter and done flag",
+        WellFormedRows(entry.objectives, rows))
 end
 
 -- ---- translated server smoke ---------------------------------------------

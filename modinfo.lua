@@ -1,7 +1,7 @@
 name = "Guided Missions"
 description = "Information-only mission chains that guide players through a playthrough."
 author = "PinkNeonDino"
-version = "0.1.0"
+version = "1.0.0"
 
 -- The game keys mods by folder name under mods/: the subscribed Workshop copy is
 -- mods/workshop-<id>, the in-game dev junction is mods/guided-missions-dev, and the

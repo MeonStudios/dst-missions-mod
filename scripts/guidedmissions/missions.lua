@@ -129,7 +129,7 @@ return {
         objectives = {
             { type = "eat", prefab = "butterflywings", count = 1, label = "Eat a butterfly wing",
               overrides = {
-                  wathgrithr = { type = "craft", prefab = "healingsalve", count = 1, label = "Craft a Healing Salve" },
+                  wathgrithr = { type = "eat", prefab = "spidergland", count = 1, label = "Eat a Spider Gland"},
                   warly = { type = "eat", prefab = "trailmix", count = 1, label = "Eat Trail Mix" },
                   wormwood = { type = "fertilize", self = true, count = 1, label = "Fertilize yourself" },
               } },

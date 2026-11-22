@@ -59,6 +59,20 @@ local ICON_ANIMS = {
         build = "evergreen_new",
         animation = "idle_normal",
     },
+    -- The two revive targets the death card names. The postern is a world
+    -- entity (`prefabs/multiplayer_portal.lua:456`: bank "portal_dst", build
+    -- "portal_stone"); the Touch Stone likewise (`prefabs/resurrectionstone.lua`
+    -- :349-351). modmain declares both anim files.
+    multiplayer_portal = {
+        bank = "portal_dst",
+        build = "portal_stone",
+        animation = "idle_loop",
+    },
+    resurrectionstone = {
+        bank = "resurrection_stone",
+        build = "resurrection_stone",
+        animation = "idle_activate",
+    },
 }
 
 local CARD_W = 320
@@ -867,9 +881,15 @@ function MissionTracker:BuildRows(rows)
     local required_column_w = CHECK_SIZE
     local optional_column_w = CHECK_SIZE
     for _, row in ipairs(rows) do
-        probe:SetString(self:MaxCounter(row))
-        probe:ResetRegionSize() -- measure the string, not a previously set region
-        local width = probe:GetRegionSize() or 0
+        -- An empty string measures as FLT_MAX (~1.7e38) in the engine, not nil
+        -- (observed in-game on `tip` rows, which carry no counter), so skip it.
+        local max_counter = self:MaxCounter(row)
+        local width = 0
+        if max_counter ~= "" then
+            probe:SetString(max_counter)
+            probe:ResetRegionSize() -- measure the string, not a previously set region
+            width = probe:GetRegionSize() or 0
+        end
         if row.optional then
             optional_column_w = math.max(optional_column_w, width)
         else
@@ -916,16 +936,21 @@ function MissionTracker:BuildRows(rows)
         else
             local counter_colour = row.optional and UICOLOURS.GOLD_UNIMPORTANT
                 or UICOLOURS.IVORY
-            local counter = self.row_root:AddChild(
-                Text(BODYTEXTFONT, 24, self:FormatCounter(row), counter_colour))
-            counter:SetVAlign(ANCHOR_MIDDLE)
-            -- An empty counter string measures nil in the engine; rows should
-            -- always carry a counter, but a malformed objective can still
-            -- produce "". Keep the stray text aligned rather than throwing.
-            counter_w = counter:GetRegionSize() or 0
-            counter:SetPosition(COLUMNS.right - counter_w / 2, y)
-            counter:SetClickable(false)
-            self.row_widgets[#self.row_widgets + 1] = counter
+            local counter_text = self:FormatCounter(row)
+            -- `tip` rows (and malformed objectives) have no counter. An empty
+            -- string measures as FLT_MAX in the engine, so draw nothing and
+            -- reserve no width rather than measure it.
+            if counter_text == "" then
+                counter_w = 0
+            else
+                local counter = self.row_root:AddChild(
+                    Text(BODYTEXTFONT, 24, counter_text, counter_colour))
+                counter:SetVAlign(ANCHOR_MIDDLE)
+                counter_w = counter:GetRegionSize() or 0
+                counter:SetPosition(COLUMNS.right - counter_w / 2, y)
+                counter:SetClickable(false)
+                self.row_widgets[#self.row_widgets + 1] = counter
+            end
         end
 
         plans[#plans + 1] = { row = row, y = y, counter_w = counter_w }

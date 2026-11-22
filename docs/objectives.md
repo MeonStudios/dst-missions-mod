@@ -47,6 +47,20 @@ starts.
 
 A `tip` row is always optional and never completes at all — see [`tip`](#tip) below.
 
+An **optional** row may be gated on a world setting with `when`:
+
+```lua
+{ type = "tip", icon = "multiplayer_portal", label = "Haunt the Florid Postern",
+  when = { setting = "portal_rez" }, optional = true }
+```
+
+The manager drops an unavailable row before writing the tracker payload, so the client
+never draws it. Known settings are listed in `Conditions.VALID_WORLD_SETTINGS`
+(currently `portal_rez`, on for Relaxed and Endless worlds). Gating is for optional rows
+only: a hidden required row would remove a mission's gate without the player seeing it.
+A character override keeps the row's gate — `when` is a property of the row slot, like
+`optional`.
+
 Missions run in file order. Each player advances independently after a 3-second
 "won" hold. The last mission is followed by a terminal "All Missions Complete" card.
 
@@ -841,6 +855,40 @@ Learn `count` new recipes.
 { type = "prototype", count = 1, prefab = "goldenaxe", label = "Prototype a Golden Axe", icon = "goldenaxe" }
 ```
 
+### `haunt`
+
+Haunt a world object as a ghost.
+
+| Field | Required | Default |
+|---|---|---|
+| `prefab` | one of the two | — |
+| `tag` | one of the two | — |
+| `count` | no | 1 |
+| `icon` | no | `prefab`; required with `tag` |
+
+- **Completes when:** the player's haunt action targets `count` matching entities.
+  `ACTIONS.HAUNT.fn` pushes `haunt` on the doer with the target entity
+  (`actions.lua:3154-3164`), server-side, before the target's haunt effect runs. A
+  target that cannot be haunted does not produce the event.
+- **`prefab` or `tag`, not both:** `prefab` matches one id (`resurrectionstone`,
+  `amulet`); `tag` matches any entity carrying it. The Florid Postern and its Celestial
+  Portal upgrade both carry `multiplayer_portal` but have different prefab ids, so a
+  tag is the right filter there.
+- **`count`** defaults to 1. A haunt is discrete, so each action counts once.
+- **Icon:** `icon` when set, otherwise `prefab`. A tag-only row has no prefab art to
+  derive, so it must name `icon`; the tracker resolves inventory ids and the world-anim
+  ids it knows (`multiplayer_portal`, `resurrectionstone`).
+- **Ghost-only:** a living player cannot haunt, so a required `haunt` row makes a
+  mission unreachable for them. Use it for ghost guidance (the death card) or as an
+  optional row anywhere.
+
+```lua
+{ type = "haunt", prefab = "resurrectionstone", label = "Haunt a Touch Stone" }
+{ type = "haunt", tag = "multiplayer_portal", icon = "multiplayer_portal",
+  label = "Haunt the Florid Postern",
+  when = { setting = "portal_rez" }, optional = true }
+```
+
 ### `tip`
 
 Show an informational row that never completes.
@@ -850,9 +898,8 @@ Show an informational row that never completes.
 | `icon` | no | none (text-only) |
 
 - **Completes when:** never. A tip is guidance only: it has no target, no progress,
-  and its row never shows a check. Otherwise it is an ordinary row — it carries the
-  normal `0/1` counter (a blank counter breaks the tracker's row layout, so it must
-  not be blanked).
+  and its row never shows a check. It carries no counter either; the tracker lays out a
+  blank right edge (it guards the empty measurement).
 - **Always optional:** a tip is rendered in the optional group and never gates
   completion, whatever the flag says. Do not author `optional = false`; it is inert
   and the validation rejects it. Every mission still needs at least one real
@@ -889,6 +936,7 @@ Show an informational row that never completes.
 | Sleep in a tent | `sleep` |
 | Reach a stat percentage | `reach_stat` |
 | Have a weapon/tool/armour equipped | `equip` |
+| Haunt a world object (as a ghost) | `haunt` |
 | Show a hint row that is not a goal | `tip` |
 
 ## Event mapping
@@ -918,6 +966,7 @@ Show an informational row that never completes.
 | `fertilize` (`self = true`) | `guidedmissions_self_fertilized` (mod pushed) | any fertilizer applied to the player |
 | `reach_stat` | `healthdelta` / `sanitydelta` / `hungerdelta` + 1 s poll (wetness/temperature: poll only) | live stat value vs objective `threshold` (percent, or degrees for temperature) |
 | `equip` | `equip` / `unequip` + 1 s poll | live `inventory.equipslots`, filtered by `prefab`/`category`/`slot` |
+| `haunt` | `haunt` | `data.target.prefab`, or `data.target:HasTag(objective.tag)` for a tag row |
 | `tip` | none | never completes (no progress, no counter) |
 
 `cookedfood`/`stewedfood`/`planted`/`trapchecked`/`slept`/`fertilized` exist
@@ -946,7 +995,7 @@ engine behavior behind each row.
    in `README.md`. If you verified new engine behavior, record it in
    `docs/dst-api.md`.
 5. **Text** — if the change adds or edits labels, regenerate `languages/en.lua` and
-   update every shipped locale (`es`, `pt`, `de`, `zh`); see
-   [`localization.md`](localization.md).
+   update every shipped locale (`es`, `pt`, `de`, `fr`, `it`, `pl`, `ru`, `ko`, `ja`,
+   `zh`, `zht`); see [`localization.md`](localization.md).
 6. Run `./verify`, then confirm in game with a human test — rendering and netvar
    replication are not covered offline.
